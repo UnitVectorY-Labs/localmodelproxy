@@ -1,0 +1,15 @@
+name: localmodelproxy
+default_branch: main
+config:
+  description: "Local OpenAI-compatible proxy for routing model requests across configurable backends while handling credentials and tracking token usage."
+  license: MIT
+  language: go
+  release: release-go
+  justfile: true
+  status: wip
+  release_github: false
+  codecov:
+    enabled: false
+  docs:
+    enabled: true
+    domain: localmodelproxy.unitvectorylabs.com
