@@ -37,4 +37,5 @@ The proxy selects a backend by inspecting the request model, validates it agains
 ## Documentation
 
 - [Usage](USAGE.md)
+- [Install](INSTALL.md)
 - [Examples](EXAMPLES.md)
