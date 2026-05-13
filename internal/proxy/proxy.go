@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/auth"
@@ -23,6 +24,8 @@ type Options struct {
 	Metrics       *Metrics
 	HTTPClient    *http.Client
 	UpstreamBase  string
+	Verbose       bool
+	LogOutput     io.Writer
 }
 
 type Proxy struct {
@@ -31,6 +34,8 @@ type Proxy struct {
 	metrics      *Metrics
 	client       *http.Client
 	upstreamBase string
+	verbose      bool
+	logOutput    io.Writer
 }
 
 func New(opts Options) *Proxy {
@@ -42,12 +47,18 @@ func New(opts Options) *Proxy {
 	if base == "" {
 		base = opts.Config.VertexBaseURL()
 	}
+	logOut := opts.LogOutput
+	if logOut == nil {
+		logOut = os.Stderr
+	}
 	return &Proxy{
 		cfg:          opts.Config,
 		tokens:       opts.TokenProvider,
 		metrics:      opts.Metrics,
 		client:       client,
 		upstreamBase: strings.TrimRight(base, "/"),
+		verbose:      opts.Verbose,
+		logOutput:    logOut,
 	}
 }
 
@@ -187,6 +198,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		record.Error = copyErr.Error()
 		return copyErr
 	}
+	if p.verbose {
+		fmt.Fprintf(p.logOutput, "request method=%s path=%s model=%q status=%d token=%s\n",
+			r.Method, r.URL.Path, record.Model, record.StatusCode, maskToken(token))
+	}
 	return nil
 }
 
@@ -239,6 +254,16 @@ func (p *Proxy) rewriteModel(body []byte, localModel string) ([]byte, bool, erro
 		return nil, false, fmt.Errorf("failed to rewrite request model: %w", err)
 	}
 	return rewritten, true, nil
+}
+
+func maskToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	if len(token) > 8 {
+		return token[:4] + "..." + token[len(token)-4:]
+	}
+	return "****"
 }
 
 func readLimited(r io.Reader, limit int) ([]byte, error) {

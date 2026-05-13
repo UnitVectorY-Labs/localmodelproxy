@@ -87,6 +87,8 @@ func run() error {
 		Config:        cfg,
 		TokenProvider: tokens,
 		Metrics:       metrics,
+		Verbose:       cfg.Verbose,
+		LogOutput:     os.Stderr,
 	})
 
 	server := &http.Server{
