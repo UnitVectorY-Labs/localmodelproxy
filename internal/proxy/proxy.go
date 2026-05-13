@@ -105,6 +105,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		model := usage.ParseModel(bodyBytes)
+		if model == "" {
+			record.StatusCode = http.StatusBadRequest
+			record.Error = "model field is required"
+			errResp, _ := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": "model field is required",
+					"type":    "invalid_request_error",
+					"code":    "invalid_request",
+				},
+			})
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(errResp)
+			return
+		}
 		if !p.modelIsConfigured(model) {
 			record.StatusCode = http.StatusBadRequest
 			record.Error = "model not found"
