@@ -97,13 +97,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !p.modelIsConfigured(model) {
 			record.StatusCode = http.StatusBadRequest
 			record.Error = "model not found"
-			errResp, _ := json.Marshal(map[string]any{
+			errResp, err := json.Marshal(map[string]any{
 				"error": map[string]any{
 					"message": fmt.Sprintf("model %q not found", model),
 					"type":    "invalid_request_error",
 					"code":    "model_not_found",
 				},
 			})
+			if err != nil {
+				http.Error(w, "model not found", http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write(errResp)
