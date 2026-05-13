@@ -150,7 +150,7 @@ Options:
   --project ID        Google Cloud project ID
   --location REGION   Google Cloud location (default: global)
   --ui MODE           UI mode: auto, tui, plain, jsonl
-  --verbose           Enable verbose diagnostics
+  --verbose           Log each request to console with token info; disables TUI
   --version           Print version and exit
   --help              Print help and exit
 
