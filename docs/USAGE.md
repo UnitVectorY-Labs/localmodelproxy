@@ -1,3 +1,11 @@
+---
+layout: default
+title: Usage
+nav_order: 2
+permalink: /usage
+has_children: true
+---
+
 # Usage
 
 `localmodelproxy` follows Unix-style command line conventions and is configured primarily through a YAML file.

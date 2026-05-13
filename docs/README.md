@@ -1,3 +1,10 @@
+---
+layout: default
+title: localmodelproxy
+nav_order: 1
+permalink: /
+---
+
 # localmodelproxy
 
 `localmodelproxy` is a local model proxy for OpenAI-compatible applications.
