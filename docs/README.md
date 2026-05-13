@@ -29,14 +29,13 @@ Use it when you want to:
 
 `localmodelproxy` listens on `127.0.0.1` by default and exposes:
 
-- `GET /v1/models`
-- `POST /v1/chat/completions`
-- `POST /v1/responses`
-- other `/v1/*` paths forwarded to the selected backend
+- `GET /v1/models` — always returns the configured models list
+- `POST /v1/chat/completions` — validated against configured model IDs and forwarded to the matching backend
 
-The proxy selects a backend by inspecting the request model, forwards the request transparently, rewrites model aliases when configured, applies the backend's authentication method, and aggregates token usage from the response.
+The proxy selects a backend by inspecting the request model, validates it against configured model IDs (returning a 400 `model_not_found` error if not found), forwards the request transparently, rewrites model aliases when configured, applies the backend's authentication method, and aggregates token usage from the response.
 
 ## Documentation
 
 - [Usage](USAGE.md)
+- [Install](INSTALL.md)
 - [Examples](EXAMPLES.md)

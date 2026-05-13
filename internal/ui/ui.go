@@ -27,7 +27,7 @@ type Renderer struct {
 }
 
 func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config, metrics *proxy.Metrics, out, errOut *os.File) *Renderer {
-	mode := resolveMode(cfg.UI.Mode, out)
+	mode := resolveMode(cfg, out)
 	renderer := &Renderer{
 		cfg:     cfg,
 		metrics: metrics,
@@ -84,14 +84,20 @@ func (r *Renderer) FinalSummary() {
 	}
 }
 
-func resolveMode(mode string, out *os.File) string {
-	if mode == "" || mode == "auto" {
+func resolveMode(cfg *config.Config, out *os.File) string {
+	if cfg.Verbose {
+		if cfg.UI.Mode == "jsonl" {
+			return "jsonl"
+		}
+		return "plain"
+	}
+	if cfg.UI.Mode == "" || cfg.UI.Mode == "auto" {
 		if term.IsTerminal(int(out.Fd())) {
 			return "tui"
 		}
 		return "plain"
 	}
-	return mode
+	return cfg.UI.Mode
 }
 
 type tickMsg time.Time
@@ -276,13 +282,8 @@ func modelRows(cfg *config.Config, snapshot proxy.Snapshot) [][]string {
 }
 
 func recentRows(snapshot proxy.Snapshot) [][]string {
-	rows := make([][]string, 0, 10)
-	for i := 0; i < 10; i++ {
-		if i >= len(snapshot.Recent) {
-			rows = append(rows, []string{fmt.Sprintf("%d", i+1), "", "", "", "", "", "", "", ""})
-			continue
-		}
-		rec := snapshot.Recent[i]
+	rows := make([][]string, 0, len(snapshot.Recent))
+	for i, rec := range snapshot.Recent {
 		rows = append(rows, []string{
 			fmt.Sprintf("%d", i+1),
 			rec.Model,

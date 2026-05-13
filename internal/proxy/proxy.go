@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/auth"
@@ -23,6 +24,8 @@ type Options struct {
 	Metrics       *Metrics
 	HTTPClient    *http.Client
 	UpstreamBase  string
+	Verbose       bool
+	LogOutput     io.Writer
 }
 
 type Proxy struct {
@@ -31,6 +34,8 @@ type Proxy struct {
 	metrics      *Metrics
 	client       *http.Client
 	upstreamBase string
+	verbose      bool
+	logOutput    io.Writer
 }
 
 func New(opts Options) *Proxy {
@@ -42,12 +47,18 @@ func New(opts Options) *Proxy {
 	if base == "" {
 		base = opts.Config.VertexBaseURL()
 	}
+	logOut := opts.LogOutput
+	if logOut == nil {
+		logOut = os.Stderr
+	}
 	return &Proxy{
 		cfg:          opts.Config,
 		tokens:       opts.TokenProvider,
 		metrics:      opts.Metrics,
 		client:       client,
 		upstreamBase: strings.TrimRight(base, "/"),
+		verbose:      opts.Verbose,
+		logOutput:    logOut,
 	}
 }
 
@@ -62,39 +73,94 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	record := p.metrics.Begin(r.Method, r.URL.Path)
 	defer p.metrics.Finish(record)
 
-	if r.URL.Path == "/v1/models" && r.Method == http.MethodGet && len(p.cfg.Models) > 0 {
+	switch r.URL.Path {
+	case "/v1/models":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			record.StatusCode = http.StatusMethodNotAllowed
+			record.Error = "method not allowed"
+			return
+		}
 		writeModels(w, p.cfg.Models)
 		record.StatusCode = http.StatusOK
-		return
-	}
 
-	if !strings.HasPrefix(r.URL.Path, "/v1/") {
+	case "/v1/chat/completions":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			record.StatusCode = http.StatusMethodNotAllowed
+			record.Error = "method not allowed"
+			return
+		}
+		var bodyBytes []byte
+		if r.Body != nil {
+			defer r.Body.Close()
+			var err error
+			bodyBytes, err = readLimited(r.Body, captureLimit)
+			if err != nil {
+				record.StatusCode = http.StatusBadRequest
+				record.Error = err.Error()
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+		model := usage.ParseModel(bodyBytes)
+		if model == "" {
+			record.StatusCode = http.StatusBadRequest
+			record.Error = "model field is required"
+			errResp, _ := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": "model field is required",
+					"type":    "invalid_request_error",
+					"code":    "invalid_request",
+				},
+			})
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(errResp)
+			return
+		}
+		if !p.modelIsConfigured(model) {
+			record.StatusCode = http.StatusBadRequest
+			record.Error = "model not found"
+			errResp, err := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": fmt.Sprintf("model %q not found", model),
+					"type":    "invalid_request_error",
+					"code":    "model_not_found",
+				},
+			})
+			if err != nil {
+				http.Error(w, "model not found", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(errResp)
+			return
+		}
+		if err := p.forward(w, r, record); err != nil {
+			if record.StatusCode == 0 {
+				record.StatusCode = http.StatusBadGateway
+			}
+			record.Error = err.Error()
+			http.Error(w, err.Error(), record.StatusCode)
+		}
+
+	default:
 		http.Error(w, "not found", http.StatusNotFound)
 		record.StatusCode = http.StatusNotFound
 		record.Error = "not found"
-		return
 	}
+}
 
-	if r.URL.Path == "/v1/models" && r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		record.StatusCode = http.StatusMethodNotAllowed
-		record.Error = "method not allowed"
-		return
-	}
-
-	if err := p.forward(w, r, record); err != nil {
-		if r.URL.Path == "/v1/models" {
-			record.StatusCode = http.StatusServiceUnavailable
-			record.Error = err.Error()
-			http.Error(w, "model list is not configured and upstream /models could not be reached; add models to ~/.localmodelproxy or verify Vertex AI access", http.StatusServiceUnavailable)
-			return
+func (p *Proxy) modelIsConfigured(model string) bool {
+	for _, m := range p.cfg.Models {
+		if m.ID == model {
+			return true
 		}
-		if record.StatusCode == 0 {
-			record.StatusCode = http.StatusBadGateway
-		}
-		record.Error = err.Error()
-		http.Error(w, err.Error(), record.StatusCode)
 	}
+	return false
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestRecord) error {
@@ -147,6 +213,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		record.Error = copyErr.Error()
 		return copyErr
 	}
+	if p.verbose {
+		fmt.Fprintf(p.logOutput, "request method=%s path=%s model=%q status=%d token=%s\n",
+			r.Method, r.URL.Path, record.Model, record.StatusCode, maskToken(token))
+	}
 	return nil
 }
 
@@ -180,7 +250,7 @@ func shouldRewriteModel(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
-	return r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses"
+	return r.URL.Path == "/v1/chat/completions"
 }
 
 func (p *Proxy) rewriteModel(body []byte, localModel string) ([]byte, bool, error) {
@@ -199,6 +269,16 @@ func (p *Proxy) rewriteModel(body []byte, localModel string) ([]byte, bool, erro
 		return nil, false, fmt.Errorf("failed to rewrite request model: %w", err)
 	}
 	return rewritten, true, nil
+}
+
+func maskToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	if len(token) > 8 {
+		return token[:4] + "..." + token[len(token)-4:]
+	}
+	return "****"
 }
 
 func readLimited(r io.Reader, limit int) ([]byte, error) {
@@ -238,6 +318,7 @@ func writeModels(w http.ResponseWriter, models []config.Model) {
 		Data   []modelEntry `json:"data"`
 	}{
 		Object: "list",
+		Data:   []modelEntry{},
 	}
 	for _, model := range models {
 		response.Data = append(response.Data, modelEntry{

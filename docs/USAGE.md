@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Usage
-nav_order: 2
+nav_order: 3
 permalink: /usage
 has_children: true
 ---
@@ -30,7 +30,7 @@ Override it with `--config` or `GEOPENPROXY_CONFIG`.
 | `--host` | host | Local bind host. Defaults to `127.0.0.1`. Non-loopback hosts are rejected. |
 | `--port` | port | Local bind port. Defaults to `8080`. |
 | `--ui` | mode | `auto`, `tui`, `plain`, or `jsonl`. Defaults to `auto`. |
-| `--verbose` | | Enables additional diagnostics. |
+| `--verbose` | | Logs each forwarded request as a line to stderr, including masked token info. Forces plain output mode (no TUI). |
 | `--version` | | Prints version and exits. |
 | `--help` | | Prints help and exits. |
 
@@ -125,7 +125,7 @@ Routing rules:
 - Exact configured model IDs win.
 - `models: all` acts as a fallback backend.
 - If more than one backend uses `models: all`, config order decides.
-- If no backend matches, the proxy returns an OpenAI-style 404 error.
+- If no backend matches, the proxy returns an OpenAI-style 400 `model_not_found` error.
 
 ## Authentication
 
@@ -215,3 +215,7 @@ The proxy captures standard OpenAI-compatible usage fields such as:
 - `completion_tokens_details.reasoning_tokens`
 
 It also captures Google-style usage metadata when present.
+
+## Verbose Mode
+
+When `--verbose` is set, each forwarded request is logged as a single line to stderr. The line includes the model, backend, and masked token details (useful for inspecting OAuth token exchanges). Verbose mode forces plain output — the TUI is not used.

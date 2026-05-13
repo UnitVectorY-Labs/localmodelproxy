@@ -48,6 +48,104 @@ func TestModelsFromConfig(t *testing.T) {
 	}
 }
 
+func TestModelsEmpty(t *testing.T) {
+	handler := New(Options{
+		Config:        testConfig(nil),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	var body struct {
+		Data []any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data) != 0 {
+		t.Fatalf("expected empty data array, got: %s", rec.Body.String())
+	}
+}
+
+func TestChatCompletionsMissingModel(t *testing.T) {
+	handler := New(Options{
+		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("expected JSON error body: %v, got: %s", err, rec.Body.String())
+	}
+	if body.Error.Code != "invalid_request" {
+		t.Fatalf("unexpected error code: %s", body.Error.Code)
+	}
+}
+
+func TestChatCompletionsModelNotFound(t *testing.T) {
+	handler := New(Options{
+		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"unknown-model"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("expected JSON error body: %v, got: %s", err, rec.Body.String())
+	}
+	if body.Error.Code != "model_not_found" {
+		t.Fatalf("unexpected error code: %s", body.Error.Code)
+	}
+}
+
+func TestNonChatEndpointRejected(t *testing.T) {
+	handler := New(Options{
+		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+	})
+
+	for _, path := range []string{"/v1/responses", "/v1/completions", "/v2/chat/completions"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"google/gemini-2.5-flash"}`))
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("path %s: expected 404, got %d", path, rec.Code)
+		}
+	}
+}
+
 func TestForwardStripsV1AndAuthorization(t *testing.T) {
 	var seenPath string
 	var seenAuth string
@@ -108,7 +206,7 @@ func TestStreamingFlushesAndAggregatesUsage(t *testing.T) {
 
 	metrics := NewMetrics()
 	handler := New(Options{
-		Config:        testConfig(nil),
+		Config:        testConfig([]config.Model{{ID: "google/gemini"}}),
 		TokenProvider: StaticTokenProvider("token"),
 		Metrics:       metrics,
 		UpstreamBase:  upstream.URL,

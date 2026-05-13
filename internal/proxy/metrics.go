@@ -113,9 +113,11 @@ func (m *Metrics) Finish(record *RequestRecord) {
 		m.models[record.Model] = stats
 	}
 
-	m.recent = append([]RequestRecord{*record}, m.recent...)
-	if len(m.recent) > maxRecent {
-		m.recent = m.recent[:maxRecent]
+	if record.StatusCode >= 200 && record.StatusCode < 400 && record.Error == "" {
+		m.recent = append([]RequestRecord{*record}, m.recent...)
+		if len(m.recent) > maxRecent {
+			m.recent = m.recent[:maxRecent]
+		}
 	}
 }
 
