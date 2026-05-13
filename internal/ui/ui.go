@@ -45,7 +45,7 @@ func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config,
 			_, _ = renderer.program.Run()
 		}()
 	case "plain", "jsonl":
-		fmt.Fprintf(errOut, "localmodelproxy listening on http://%s/v1 project=%s location=%s config=%s\n", cfg.Address(), cfg.Vertex.Project, cfg.Vertex.Location, configSource(cfg))
+		fmt.Fprintf(errOut, "localmodelproxy listening on http://%s/v1 config=%s\n", cfg.Address(), configSource(cfg))
 		for _, model := range cfg.Models {
 			fmt.Fprintf(errOut, "model %s\n", model.ID)
 		}
@@ -140,10 +140,7 @@ func (m tuiModel) View() string {
 	muted := style(m.color, "muted")
 
 	fmt.Fprintf(&b, "%s %s\n", title, value.Render("http://"+m.cfg.Address()+"/v1"))
-	fmt.Fprintf(&b, "%s %s\n", muted.Render("Config "), value.Render(configSource(m.cfg)))
-	fmt.Fprintf(&b, "%s %s   %s %s\n\n",
-		muted.Render("Project"), value.Render(m.cfg.Vertex.Project),
-		muted.Render("Location"), value.Render(m.cfg.Vertex.Location))
+	fmt.Fprintf(&b, "%s %s\n\n", muted.Render("Config "), value.Render(configSource(m.cfg)))
 
 	b.WriteString(sectionTitle(m.color, "Token Totals"))
 	b.WriteByte('\n')

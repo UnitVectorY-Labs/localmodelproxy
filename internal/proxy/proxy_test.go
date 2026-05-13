@@ -15,7 +15,6 @@ import (
 func testConfig(models []config.Model) *config.Config {
 	return &config.Config{
 		Server: config.ServerConfig{Host: "127.0.0.1", Port: 8080},
-		Vertex: config.VertexConfig{Project: "p", Location: "global"},
 		Models: models,
 		UI:     config.UIConfig{Mode: "plain"},
 	}

@@ -49,8 +49,6 @@ func run() error {
 	flag.StringVar(&flags.ConfigPath, "config", "", "Path to YAML config file (env: LOCALMODELPROXY_CONFIG)")
 	flag.StringVar(&flags.Host, "host", "", "Local bind host (default: 127.0.0.1)")
 	flag.IntVar(&flags.Port, "port", 0, "Local bind port (default: 8080)")
-	flag.StringVar(&flags.Project, "project", "", "Google Cloud project ID")
-	flag.StringVar(&flags.Location, "location", "", "Google Cloud location (default: global)")
 	flag.StringVar(&flags.UIMode, "ui", "", "UI mode: auto, tui, plain, jsonl")
 	flag.BoolVar(&flags.Verbose, "verbose", false, "Enable verbose diagnostics")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
@@ -138,7 +136,7 @@ func shutdownServer(server *http.Server, done <-chan error) error {
 }
 
 func printHelp() {
-	fmt.Fprintf(os.Stderr, `localmodelproxy - Local Vertex AI Gemini OpenAI-compatible proxy
+	fmt.Fprintf(os.Stderr, `localmodelproxy - Local OpenAI-compatible proxy
 
 Usage:
   localmodelproxy [OPTIONS]
@@ -147,8 +145,6 @@ Options:
   --config PATH       Path to YAML config file (env: LOCALMODELPROXY_CONFIG)
   --host HOST         Local bind host (default: 127.0.0.1)
   --port PORT         Local bind port (default: 8080)
-  --project ID        Google Cloud project ID
-  --location REGION   Google Cloud location (default: global)
   --ui MODE           UI mode: auto, tui, plain, jsonl
   --verbose           Log each request to console with token info; disables TUI
   --version           Print version and exit

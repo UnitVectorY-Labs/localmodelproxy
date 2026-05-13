@@ -37,9 +37,6 @@ func TestLoadConfigAndFlagOverrides(t *testing.T) {
 server:
   host: 127.0.0.1
   port: 9000
-vertex:
-  project: yaml-project
-  location: us-central1
 models:
   - id: google/gemini-2.5-flash
 ui:
@@ -52,13 +49,12 @@ ui:
 	cfg, err := Load(Flags{
 		ConfigPath: path,
 		Port:       9100,
-		Project:    "flag-project",
 		UIMode:     "jsonl",
 	})
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.Server.Port != 9100 || cfg.Vertex.Project != "flag-project" || cfg.UI.Mode != "jsonl" {
+	if cfg.Server.Port != 9100 || cfg.UI.Mode != "jsonl" {
 		t.Fatalf("flags did not override yaml: %#v", cfg)
 	}
 	if len(cfg.Models) != 1 || cfg.Models[0].ID != "google/gemini-2.5-flash" {
@@ -70,11 +66,10 @@ func TestLoadDefaultDotfileConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("LOCALMODELPROXY_CONFIG", "")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "env-dotfile-project")
 
 	path := filepath.Join(home, ".localmodelproxy")
 	content := []byte(`
-vertex:
-  project: dotfile-project
 models:
   - id: gemini-3.1-flash-lite-preview
 `)
@@ -86,7 +81,7 @@ models:
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.Vertex.Project != "dotfile-project" {
+	if cfg.Vertex.Project != "env-dotfile-project" {
 		t.Fatalf("unexpected project: %s", cfg.Vertex.Project)
 	}
 	if len(cfg.Models) != 1 || cfg.Models[0].ID != "gemini-3.1-flash-lite-preview" {
@@ -96,9 +91,24 @@ models:
 
 func TestRejectsNonLoopback(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	_, err := Load(Flags{Host: "0.0.0.0", Project: "p"})
+	_, err := Load(Flags{Host: "0.0.0.0"})
 	if !errors.Is(err, ErrUsage) {
 		t.Fatalf("expected usage error, got %v", err)
+	}
+}
+
+func TestLoadsWithoutProject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+	t.Setenv("CLOUDSDK_CORE_PROJECT", "")
+	t.Setenv("LOCALMODELPROXY_CONFIG", "")
+
+	cfg, err := Load(Flags{})
+	if err != nil {
+		t.Fatalf("expected no error when project is not set, got: %v", err)
+	}
+	if cfg.Vertex.Project != "" {
+		t.Fatalf("expected empty project, got: %s", cfg.Vertex.Project)
 	}
 }
 

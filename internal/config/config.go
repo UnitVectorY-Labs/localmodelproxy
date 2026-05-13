@@ -24,15 +24,13 @@ type Flags struct {
 	ConfigPath string
 	Host       string
 	Port       int
-	Project    string
-	Location   string
 	UIMode     string
 	Verbose    bool
 }
 
 type Config struct {
 	Server     ServerConfig `yaml:"server"`
-	Vertex     VertexConfig `yaml:"vertex"`
+	Vertex     VertexConfig `yaml:"-"`
 	Models     []Model      `yaml:"models"`
 	UI         UIConfig     `yaml:"ui"`
 	Verbose    bool         `yaml:"verbose"`
@@ -45,8 +43,8 @@ type ServerConfig struct {
 }
 
 type VertexConfig struct {
-	Project  string `yaml:"project"`
-	Location string `yaml:"location"`
+	Project  string
+	Location string
 }
 
 type Model struct {
@@ -86,12 +84,6 @@ func Load(flags Flags) (*Config, error) {
 	if flags.Port != 0 {
 		cfg.Server.Port = flags.Port
 	}
-	if flags.Project != "" {
-		cfg.Vertex.Project = flags.Project
-	}
-	if flags.Location != "" {
-		cfg.Vertex.Location = flags.Location
-	}
 	if flags.UIMode != "" {
 		cfg.UI.Mode = flags.UIMode
 	}
@@ -124,12 +116,6 @@ func (c *Config) Validate() error {
 	}
 	if !IsLoopbackHost(c.Server.Host) {
 		return usage(fmt.Sprintf("refusing to bind to non-loopback host %q", c.Server.Host))
-	}
-	if c.Vertex.Project == "" {
-		return usage("--project is required, or set vertex.project, GOOGLE_CLOUD_PROJECT, or CLOUDSDK_CORE_PROJECT")
-	}
-	if c.Vertex.Location == "" {
-		return usage("location cannot be empty")
 	}
 	switch c.UI.Mode {
 	case "", "auto", "tui", "plain", "jsonl":
