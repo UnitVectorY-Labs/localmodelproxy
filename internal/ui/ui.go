@@ -46,7 +46,7 @@ func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config,
 		}()
 	case "plain", "jsonl":
 		fmt.Fprintf(errOut, "localmodelproxy listening on http://%s/v1 config=%s\n", cfg.Address(), configSource(cfg))
-		for _, model := range cfg.Models {
+		for _, model := range cfg.AllModels() {
 			fmt.Fprintf(errOut, "model %s\n", model.ID)
 		}
 	}
@@ -246,7 +246,7 @@ func renderTable(color bool, columns []column, rows [][]string) string {
 
 func modelRows(cfg *config.Config, snapshot proxy.Snapshot) [][]string {
 	modelNames := make(map[string]struct{})
-	for _, model := range cfg.Models {
+	for _, model := range cfg.AllModels() {
 		modelNames[model.ID] = struct{}{}
 	}
 	for model := range snapshot.Models {

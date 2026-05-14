@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/UnitVectorY-Labs/localmodelproxy/internal/auth"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/config"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/proxy"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/ui"
@@ -75,19 +74,16 @@ func run() error {
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
 
-	tokens, err := auth.NewADCProvider(ctx)
+	metrics := proxy.NewMetrics()
+	handler, err := proxy.New(ctx, proxy.Options{
+		Config:    cfg,
+		Metrics:   metrics,
+		Verbose:   cfg.Verbose,
+		LogOutput: os.Stderr,
+	})
 	if err != nil {
 		return err
 	}
-
-	metrics := proxy.NewMetrics()
-	handler := proxy.New(proxy.Options{
-		Config:        cfg,
-		TokenProvider: tokens,
-		Metrics:       metrics,
-		Verbose:       cfg.Verbose,
-		LogOutput:     os.Stderr,
-	})
 
 	server := &http.Server{
 		Addr:              cfg.Address(),

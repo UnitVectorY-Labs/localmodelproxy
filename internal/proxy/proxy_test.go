@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,15 +14,34 @@ import (
 )
 
 func testConfig(models []config.Model) *config.Config {
+	var backends []config.BackendConfig
+	if len(models) > 0 {
+		backends = []config.BackendConfig{{
+			Name:    "test",
+			Type:    "gcp_openai",
+			BaseURL: "http://unused",
+			Auth:    config.AuthConfig{Type: "none"},
+			Models:  config.BackendModels{Models: models},
+		}}
+	}
 	return &config.Config{
-		Server: config.ServerConfig{Host: "127.0.0.1", Port: 8080},
-		Models: models,
-		UI:     config.UIConfig{Mode: "plain"},
+		Server:   config.ServerConfig{Host: "127.0.0.1", Port: 8080},
+		Backends: backends,
+		UI:       config.UIConfig{Mode: "plain"},
 	}
 }
 
+func mustNew(t *testing.T, opts Options) *Proxy {
+	t.Helper()
+	p, err := New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("proxy.New returned error: %v", err)
+	}
+	return p
+}
+
 func TestModelsFromConfig(t *testing.T) {
-	handler := New(Options{
+	handler := mustNew(t, Options{
 		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
 		TokenProvider: StaticTokenProvider("token"),
 		Metrics:       NewMetrics(),
@@ -48,7 +68,7 @@ func TestModelsFromConfig(t *testing.T) {
 }
 
 func TestModelsEmpty(t *testing.T) {
-	handler := New(Options{
+	handler := mustNew(t, Options{
 		Config:        testConfig(nil),
 		TokenProvider: StaticTokenProvider("token"),
 		Metrics:       NewMetrics(),
@@ -73,7 +93,7 @@ func TestModelsEmpty(t *testing.T) {
 }
 
 func TestChatCompletionsMissingModel(t *testing.T) {
-	handler := New(Options{
+	handler := mustNew(t, Options{
 		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
 		TokenProvider: StaticTokenProvider("token"),
 		Metrics:       NewMetrics(),
@@ -101,7 +121,7 @@ func TestChatCompletionsMissingModel(t *testing.T) {
 }
 
 func TestChatCompletionsModelNotFound(t *testing.T) {
-	handler := New(Options{
+	handler := mustNew(t, Options{
 		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
 		TokenProvider: StaticTokenProvider("token"),
 		Metrics:       NewMetrics(),
@@ -129,7 +149,7 @@ func TestChatCompletionsModelNotFound(t *testing.T) {
 }
 
 func TestNonChatEndpointRejected(t *testing.T) {
-	handler := New(Options{
+	handler := mustNew(t, Options{
 		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
 		TokenProvider: StaticTokenProvider("token"),
 		Metrics:       NewMetrics(),
@@ -160,7 +180,7 @@ func TestForwardStripsV1AndAuthorization(t *testing.T) {
 	defer upstream.Close()
 
 	metrics := NewMetrics()
-	handler := New(Options{
+	handler := mustNew(t, Options{
 		Config:        testConfig([]config.Model{{ID: "gemini-3.1-flash-lite-preview"}}),
 		TokenProvider: StaticTokenProvider("replacement"),
 		Metrics:       metrics,
@@ -204,7 +224,7 @@ func TestStreamingFlushesAndAggregatesUsage(t *testing.T) {
 	defer upstream.Close()
 
 	metrics := NewMetrics()
-	handler := New(Options{
+	handler := mustNew(t, Options{
 		Config:        testConfig([]config.Model{{ID: "google/gemini"}}),
 		TokenProvider: StaticTokenProvider("token"),
 		Metrics:       metrics,
