@@ -214,6 +214,13 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		return err
 	}
 
+	if p.verbose {
+		defer func() {
+			fmt.Fprintf(p.logOutput, "request method=%s path=%s model=%q status=%d backend=%s token=%s\n",
+				r.Method, r.URL.Path, record.Model, record.StatusCode, backend.cfg.Name, maskToken(token))
+		}()
+	}
+
 	body, localModel, err := p.prepareRequestBody(r, backend)
 	if err != nil {
 		record.StatusCode = http.StatusBadRequest
@@ -268,11 +275,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	}
 	if copyErr != nil {
 		record.Error = copyErr.Error()
-		return copyErr
-	}
-	if p.verbose {
-		fmt.Fprintf(p.logOutput, "request method=%s path=%s model=%q status=%d backend=%s token=%s\n",
-			r.Method, r.URL.Path, record.Model, record.StatusCode, backend.cfg.Name, maskToken(token))
+		return nil // response headers already written; cannot write an error response
 	}
 	return nil
 }
