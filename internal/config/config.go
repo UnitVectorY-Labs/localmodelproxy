@@ -24,19 +24,16 @@ type Flags struct {
 	ConfigPath string
 	Host       string
 	Port       int
-	Project    string
-	Location   string
 	UIMode     string
 	Verbose    bool
 }
 
 type Config struct {
-	Server     ServerConfig `yaml:"server"`
-	Vertex     VertexConfig `yaml:"vertex"`
-	Models     []Model      `yaml:"models"`
-	UI         UIConfig     `yaml:"ui"`
-	Verbose    bool         `yaml:"verbose"`
-	SourcePath string       `yaml:"-"`
+	Server     ServerConfig    `yaml:"server"`
+	Backends   []BackendConfig `yaml:"backends"`
+	UI         UIConfig        `yaml:"ui"`
+	Verbose    bool            `yaml:"verbose"`
+	SourcePath string          `yaml:"-"`
 }
 
 type ServerConfig struct {
@@ -44,9 +41,47 @@ type ServerConfig struct {
 	Port int    `yaml:"port"`
 }
 
-type VertexConfig struct {
-	Project  string `yaml:"project"`
-	Location string `yaml:"location"`
+// BackendConfig describes one upstream backend.
+type BackendConfig struct {
+	Name               string        `yaml:"name"`
+	Type               string        `yaml:"type"` // gcp_openai or openai_compatible
+	BaseURL            string        `yaml:"base_url"`
+	Project            string        `yaml:"project"`
+	Location           string        `yaml:"location"`
+	InsecureSkipVerify bool          `yaml:"insecure_skip_verify"`
+	Auth               AuthConfig    `yaml:"auth"`
+	Models             BackendModels `yaml:"models"`
+}
+
+// AuthConfig describes how to authenticate against a backend.
+type AuthConfig struct {
+	Type               string   `yaml:"type"` // none, bearer, google_adc, oauth_client_credentials
+	Token              string   `yaml:"token"`
+	TokenURL           string   `yaml:"token_url"`
+	ClientID           string   `yaml:"client_id"`
+	ClientSecret       string   `yaml:"client_secret"`
+	Scopes             []string `yaml:"scopes"`
+	InsecureSkipVerify bool     `yaml:"insecure_skip_verify"`
+}
+
+// BackendModels holds either "all" (pass-through) or an explicit list of models.
+type BackendModels struct {
+	All    bool
+	Models []Model
+}
+
+// UnmarshalYAML supports both `models: all` and `models: [{id: ...}]`.
+func (bm *BackendModels) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode && value.Value == "all" {
+		bm.All = true
+		return nil
+	}
+	var models []Model
+	if err := value.Decode(&models); err != nil {
+		return err
+	}
+	bm.Models = models
+	return nil
 }
 
 type Model struct {
@@ -63,9 +98,6 @@ func Load(flags Flags) (*Config, error) {
 		Server: ServerConfig{
 			Host: DefaultHost,
 			Port: DefaultPort,
-		},
-		Vertex: VertexConfig{
-			Location: DefaultLocation,
 		},
 		UI: UIConfig{
 			Mode: DefaultUIMode,
@@ -86,12 +118,6 @@ func Load(flags Flags) (*Config, error) {
 	if flags.Port != 0 {
 		cfg.Server.Port = flags.Port
 	}
-	if flags.Project != "" {
-		cfg.Vertex.Project = flags.Project
-	}
-	if flags.Location != "" {
-		cfg.Vertex.Location = flags.Location
-	}
 	if flags.UIMode != "" {
 		cfg.UI.Mode = flags.UIMode
 	}
@@ -99,14 +125,29 @@ func Load(flags Flags) (*Config, error) {
 		cfg.Verbose = true
 	}
 
-	if cfg.Vertex.Project == "" {
-		cfg.Vertex.Project = firstEnv("GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT")
-	}
-	if cfg.Vertex.Location == "" {
-		cfg.Vertex.Location = firstEnv("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUDSDK_COMPUTE_REGION")
-	}
-	if cfg.Vertex.Location == "" {
-		cfg.Vertex.Location = DefaultLocation
+	// Apply defaults and env-var expansion to each backend.
+	for i := range cfg.Backends {
+		bc := &cfg.Backends[i]
+
+		// Expand env vars in sensitive string fields.
+		bc.BaseURL = os.ExpandEnv(bc.BaseURL)
+		bc.Auth.Token = os.ExpandEnv(bc.Auth.Token)
+		bc.Auth.TokenURL = os.ExpandEnv(bc.Auth.TokenURL)
+		bc.Auth.ClientID = os.ExpandEnv(bc.Auth.ClientID)
+		bc.Auth.ClientSecret = os.ExpandEnv(bc.Auth.ClientSecret)
+
+		// For gcp_openai, fill in project/location from env if not set.
+		if bc.Type == "gcp_openai" {
+			if bc.Project == "" {
+				bc.Project = firstEnv("GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT")
+			}
+			if bc.Location == "" {
+				bc.Location = firstEnv("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUDSDK_COMPUTE_REGION")
+			}
+			if bc.Location == "" {
+				bc.Location = DefaultLocation
+			}
+		}
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -125,12 +166,6 @@ func (c *Config) Validate() error {
 	if !IsLoopbackHost(c.Server.Host) {
 		return usage(fmt.Sprintf("refusing to bind to non-loopback host %q", c.Server.Host))
 	}
-	if c.Vertex.Project == "" {
-		return usage("--project is required, or set vertex.project, GOOGLE_CLOUD_PROJECT, or CLOUDSDK_CORE_PROJECT")
-	}
-	if c.Vertex.Location == "" {
-		return usage("location cannot be empty")
-	}
 	switch c.UI.Mode {
 	case "", "auto", "tui", "plain", "jsonl":
 	default:
@@ -139,9 +174,40 @@ func (c *Config) Validate() error {
 	if c.UI.Mode == "" {
 		c.UI.Mode = DefaultUIMode
 	}
-	for _, model := range c.Models {
-		if strings.TrimSpace(model.ID) == "" {
-			return usage("models entries must include a non-empty id")
+
+	seen := make(map[string]bool)
+	for _, bc := range c.Backends {
+		if strings.TrimSpace(bc.Name) == "" {
+			return usage("backends entries must include a non-empty name")
+		}
+		if seen[bc.Name] {
+			return usage(fmt.Sprintf("duplicate backend name %q", bc.Name))
+		}
+		seen[bc.Name] = true
+
+		switch bc.Type {
+		case "gcp_openai", "openai_compatible":
+		default:
+			return usage(fmt.Sprintf("backend %q: type must be gcp_openai or openai_compatible", bc.Name))
+		}
+
+		if bc.Type == "openai_compatible" && bc.BaseURL == "" {
+			return usage(fmt.Sprintf("backend %q: openai_compatible backend requires base_url", bc.Name))
+		}
+		if bc.Type == "gcp_openai" && bc.BaseURL == "" && bc.Project == "" {
+			return usage(fmt.Sprintf("backend %q: gcp_openai backend requires base_url or project", bc.Name))
+		}
+
+		switch bc.Auth.Type {
+		case "none", "bearer", "google_adc", "oauth_client_credentials":
+		default:
+			return usage(fmt.Sprintf("backend %q: auth type must be none, bearer, google_adc, or oauth_client_credentials", bc.Name))
+		}
+
+		for _, m := range bc.Models.Models {
+			if strings.TrimSpace(m.ID) == "" {
+				return usage(fmt.Sprintf("backend %q: models entries must include a non-empty id", bc.Name))
+			}
 		}
 	}
 	return nil
@@ -151,43 +217,84 @@ func (c *Config) Address() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
-func (c *Config) UpstreamModelID(id string) string {
-	for _, model := range c.Models {
-		if model.ID == id {
-			if model.UpstreamID != "" {
-				return model.UpstreamID
-			}
-			if strings.Contains(id, "/") {
-				return id
-			}
-			return "google/" + id
+// AllModels returns all explicitly-listed models across all backends (excludes "models: all" backends).
+func (c *Config) AllModels() []Model {
+	var out []Model
+	for _, bc := range c.Backends {
+		if !bc.Models.All {
+			out = append(out, bc.Models.Models...)
 		}
 	}
-	return id
+	return out
 }
 
-func (c *Config) LocalModelID(upstreamID string) string {
-	for _, model := range c.Models {
-		resolved := model.UpstreamID
-		if resolved == "" {
-			if strings.Contains(model.ID, "/") {
-				resolved = model.ID
-			} else {
-				resolved = "google/" + model.ID
+// BackendForModel returns the first backend that serves the given model ID.
+// Exact-listed models take priority over "models: all" pass-through backends.
+func (c *Config) BackendForModel(id string) *BackendConfig {
+	var fallback *BackendConfig
+	for i := range c.Backends {
+		bc := &c.Backends[i]
+		if bc.Models.All {
+			if fallback == nil {
+				fallback = bc
+			}
+			continue
+		}
+		for _, m := range bc.Models.Models {
+			if m.ID == id {
+				return bc
 			}
 		}
-		if resolved == upstreamID {
-			return model.ID
+	}
+	return fallback
+}
+
+// LocalModelID translates an upstream model ID back to the local model ID.
+func (c *Config) LocalModelID(upstreamID string) string {
+	for _, bc := range c.Backends {
+		if bc.Models.All {
+			continue
+		}
+		for _, m := range bc.Models.Models {
+			resolved := bc.resolvedUpstreamID(m)
+			if resolved == upstreamID {
+				return m.ID
+			}
 		}
 	}
 	return upstreamID
 }
 
-func (c *Config) VertexBaseURL() string {
-	if c.Vertex.Location == "global" {
-		return fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/endpoints/openapi", c.Vertex.Project, c.Vertex.Location)
+// UpstreamModelID returns the upstream model ID that should be sent to the backend for the given local model ID.
+func (bc *BackendConfig) UpstreamModelID(id string) string {
+	for _, m := range bc.Models.Models {
+		if m.ID == id {
+			return bc.resolvedUpstreamID(m)
+		}
 	}
-	return fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/endpoints/openapi", c.Vertex.Location, c.Vertex.Project, c.Vertex.Location)
+	// For pass-through backends or unknown models, apply type-based default.
+	if bc.Type == "gcp_openai" && !strings.Contains(id, "/") {
+		return "google/" + id
+	}
+	return id
+}
+
+func (bc *BackendConfig) resolvedUpstreamID(m Model) string {
+	if m.UpstreamID != "" {
+		return m.UpstreamID
+	}
+	if bc.Type == "gcp_openai" && !strings.Contains(m.ID, "/") {
+		return "google/" + m.ID
+	}
+	return m.ID
+}
+
+// VertexBaseURL computes the Vertex AI OpenAI-compatible base URL for a gcp_openai backend.
+func (bc *BackendConfig) VertexBaseURL() string {
+	if bc.Location == "global" {
+		return fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/endpoints/openapi", bc.Project, bc.Location)
+	}
+	return fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/endpoints/openapi", bc.Location, bc.Project, bc.Location)
 }
 
 func IsLoopbackHost(host string) bool {

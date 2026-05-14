@@ -20,13 +20,13 @@ By default, the config file is read from:
 ~/.localmodelproxy
 ```
 
-Override it with `--config` or `GEOPENPROXY_CONFIG`.
+Override it with `--config` or `LOCALMODELPROXY_CONFIG`.
 
 ## Flags
 
 | Flag | Argument | Notes |
 |------|----------|-------|
-| `--config` | path | YAML config path. Overrides `GEOPENPROXY_CONFIG` and the default `~/.localmodelproxy`. |
+| `--config` | path | YAML config path. Overrides `LOCALMODELPROXY_CONFIG` and the default `~/.localmodelproxy`. |
 | `--host` | host | Local bind host. Defaults to `127.0.0.1`. Non-loopback hosts are rejected. |
 | `--port` | port | Local bind port. Defaults to `8080`. |
 | `--ui` | mode | `auto`, `tui`, `plain`, or `jsonl`. Defaults to `auto`. |
@@ -34,13 +34,11 @@ Override it with `--config` or `GEOPENPROXY_CONFIG`.
 | `--version` | | Prints version and exits. |
 | `--help` | | Prints help and exits. |
 
-The legacy single-backend flags `--project` and `--location` may be kept for compatibility during migration, but backend configuration should live in YAML.
-
 ## Environment Variables
 
 | Variable | Purpose |
 |----------|---------|
-| `GEOPENPROXY_CONFIG` | Config file path when `--config` is not provided. |
+| `LOCALMODELPROXY_CONFIG` | Config file path when `--config` is not provided. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Service account JSON file used by Google Application Default Credentials. |
 | `GOOGLE_CLOUD_PROJECT` | Optional Google Cloud project fallback for Google ADC backends. |
 | `CLOUDSDK_CORE_PROJECT` | Optional Google Cloud project fallback for Google ADC backends. |

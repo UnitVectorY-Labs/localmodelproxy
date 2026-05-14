@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,48 +19,84 @@ import (
 
 const captureLimit = 8 * 1024 * 1024
 
+// Options configures a Proxy.
+// TokenProvider and UpstreamBase are optional global overrides (used in tests).
+// When not set, per-backend auth and URLs from Config.Backends are used.
 type Options struct {
 	Config        *config.Config
-	TokenProvider auth.TokenProvider
+	TokenProvider auth.TokenProvider // optional global override
 	Metrics       *Metrics
 	HTTPClient    *http.Client
-	UpstreamBase  string
+	UpstreamBase  string // optional global override
 	Verbose       bool
 	LogOutput     io.Writer
 }
 
-type Proxy struct {
-	cfg          *config.Config
-	tokens       auth.TokenProvider
-	metrics      *Metrics
-	client       *http.Client
-	upstreamBase string
-	verbose      bool
-	logOutput    io.Writer
+// resolvedBackend is an initialised backend ready to handle requests.
+type resolvedBackend struct {
+	cfg    config.BackendConfig
+	tokens auth.TokenProvider
+	base   string // trimmed base URL
 }
 
-func New(opts Options) *Proxy {
+type Proxy struct {
+	cfg       *config.Config
+	backends  []*resolvedBackend
+	metrics   *Metrics
+	client    *http.Client
+	verbose   bool
+	logOutput io.Writer
+}
+
+// New creates a Proxy and initialises an auth provider for each configured backend.
+// If Options.TokenProvider and/or Options.UpstreamBase are set they act as global
+// overrides for all backends (used in tests).
+func New(ctx context.Context, opts Options) (*Proxy, error) {
 	client := opts.HTTPClient
 	if client == nil {
 		client = http.DefaultClient
-	}
-	base := opts.UpstreamBase
-	if base == "" {
-		base = opts.Config.VertexBaseURL()
 	}
 	logOut := opts.LogOutput
 	if logOut == nil {
 		logOut = os.Stderr
 	}
-	return &Proxy{
-		cfg:          opts.Config,
-		tokens:       opts.TokenProvider,
-		metrics:      opts.Metrics,
-		client:       client,
-		upstreamBase: strings.TrimRight(base, "/"),
-		verbose:      opts.Verbose,
-		logOutput:    logOut,
+
+	backends := make([]*resolvedBackend, 0, len(opts.Config.Backends))
+	for _, bc := range opts.Config.Backends {
+		// Auth: prefer global override (for tests), otherwise create from config.
+		tokens := opts.TokenProvider
+		if tokens == nil {
+			var err error
+			tokens, err = auth.NewProvider(ctx, bc.Auth)
+			if err != nil {
+				return nil, fmt.Errorf("backend %q: %w", bc.Name, err)
+			}
+		}
+
+		// URL: prefer global override (for tests), otherwise derive from backend config.
+		base := opts.UpstreamBase
+		if base == "" {
+			base = bc.BaseURL
+			if base == "" && bc.Type == "gcp_openai" {
+				base = bc.VertexBaseURL()
+			}
+		}
+
+		backends = append(backends, &resolvedBackend{
+			cfg:    bc,
+			tokens: tokens,
+			base:   strings.TrimRight(base, "/"),
+		})
 	}
+
+	return &Proxy{
+		cfg:       opts.Config,
+		backends:  backends,
+		metrics:   opts.Metrics,
+		client:    client,
+		verbose:   opts.Verbose,
+		logOutput: logOut,
+	}, nil
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +118,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			record.Error = "method not allowed"
 			return
 		}
-		writeModels(w, p.cfg.Models)
+		writeModels(w, p.cfg.Backends)
 		record.StatusCode = http.StatusOK
 
 	case "/v1/chat/completions":
@@ -120,7 +157,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(errResp)
 			return
 		}
-		if !p.modelIsConfigured(model) {
+		backend := p.backendForModel(model)
+		if backend == nil {
 			record.StatusCode = http.StatusBadRequest
 			record.Error = "model not found"
 			errResp, err := json.Marshal(map[string]any{
@@ -139,7 +177,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(errResp)
 			return
 		}
-		if err := p.forward(w, r, record); err != nil {
+		if err := p.forward(w, r, record, backend); err != nil {
 			if record.StatusCode == 0 {
 				record.StatusCode = http.StatusBadGateway
 			}
@@ -154,29 +192,43 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (p *Proxy) modelIsConfigured(model string) bool {
-	for _, m := range p.cfg.Models {
-		if m.ID == model {
-			return true
+// backendForModel returns the resolved backend that should handle the given model,
+// or nil if none is configured.
+func (p *Proxy) backendForModel(model string) *resolvedBackend {
+	cfgBackend := p.cfg.BackendForModel(model)
+	if cfgBackend == nil {
+		return nil
+	}
+	for _, rb := range p.backends {
+		if rb.cfg.Name == cfgBackend.Name {
+			return rb
 		}
 	}
-	return false
+	return nil
 }
 
-func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestRecord) error {
-	token, err := p.tokens.Token(r.Context())
+func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestRecord, backend *resolvedBackend) error {
+	token, err := backend.tokens.Token(r.Context())
 	if err != nil {
 		record.StatusCode = http.StatusUnauthorized
 		return err
 	}
 
-	body, localModel, err := p.prepareRequestBody(r)
+	if p.verbose {
+		defer func() {
+			fmt.Fprintf(p.logOutput, "request method=%s path=%s model=%q status=%d backend=%s token=%s\n",
+				r.Method, r.URL.Path, record.Model, record.StatusCode, backend.cfg.Name, maskToken(token))
+		}()
+	}
+
+	body, localModel, err := p.prepareRequestBody(r, backend)
 	if err != nil {
 		record.StatusCode = http.StatusBadRequest
 		return err
 	}
 	record.Model = localModel
-	upstreamURL, err := p.upstreamURL(r.URL)
+
+	upstreamURL, err := buildUpstreamURL(backend.base, r.URL)
 	if err != nil {
 		record.StatusCode = http.StatusBadGateway
 		return err
@@ -188,7 +240,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		return err
 	}
 	copyRequestHeaders(req.Header, r.Header)
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -202,7 +256,17 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	w.WriteHeader(resp.StatusCode)
 
 	responseCapture := &limitedBuffer{limit: captureLimit}
-	_, copyErr := streamCopy(w, resp.Body, responseCapture)
+	var copyErr error
+	if resp.StatusCode == http.StatusOK && record.Model != "" {
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/event-stream") {
+			_, copyErr = streamCopySSEWithModelRewrite(w, resp.Body, responseCapture, record.Model)
+		} else {
+			_, copyErr = streamCopyJSONWithModelRewrite(w, resp.Body, responseCapture, record.Model)
+		}
+	} else {
+		_, copyErr = streamCopy(w, resp.Body, responseCapture)
+	}
 	if parsedUsage, model, ok := parseUsage(resp.Header, responseCapture.Bytes()); ok {
 		record.Usage = parsedUsage
 		if model != "" {
@@ -211,16 +275,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	}
 	if copyErr != nil {
 		record.Error = copyErr.Error()
-		return copyErr
-	}
-	if p.verbose {
-		fmt.Fprintf(p.logOutput, "request method=%s path=%s model=%q status=%d token=%s\n",
-			r.Method, r.URL.Path, record.Model, record.StatusCode, maskToken(token))
+		return nil // response headers already written; cannot write an error response
 	}
 	return nil
 }
 
-func (p *Proxy) prepareRequestBody(r *http.Request) (io.ReadCloser, string, error) {
+func (p *Proxy) prepareRequestBody(r *http.Request, backend *resolvedBackend) (io.ReadCloser, string, error) {
 	if r.Body == nil {
 		return io.NopCloser(bytes.NewReader(nil)), "", nil
 	}
@@ -233,7 +293,7 @@ func (p *Proxy) prepareRequestBody(r *http.Request) (io.ReadCloser, string, erro
 
 	localModel := usage.ParseModel(body)
 	if shouldRewriteModel(r) && localModel != "" {
-		rewritten, changed, err := p.rewriteModel(body, localModel)
+		rewritten, changed, err := rewriteModel(body, localModel, &backend.cfg)
 		if err != nil {
 			return nil, localModel, err
 		}
@@ -253,8 +313,8 @@ func shouldRewriteModel(r *http.Request) bool {
 	return r.URL.Path == "/v1/chat/completions"
 }
 
-func (p *Proxy) rewriteModel(body []byte, localModel string) ([]byte, bool, error) {
-	upstreamModel := p.cfg.UpstreamModelID(localModel)
+func rewriteModel(body []byte, localModel string, bc *config.BackendConfig) ([]byte, bool, error) {
+	upstreamModel := bc.UpstreamModelID(localModel)
 	if upstreamModel == localModel {
 		return body, false, nil
 	}
@@ -293,12 +353,12 @@ func readLimited(r io.Reader, limit int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (p *Proxy) upstreamURL(in *url.URL) (string, error) {
+func buildUpstreamURL(base string, in *url.URL) (string, error) {
 	path := strings.TrimPrefix(in.EscapedPath(), "/v1")
 	if path == "" {
 		path = "/"
 	}
-	parsed, err := url.Parse(p.upstreamBase + path)
+	parsed, err := url.Parse(base + path)
 	if err != nil {
 		return "", err
 	}
@@ -306,7 +366,7 @@ func (p *Proxy) upstreamURL(in *url.URL) (string, error) {
 	return parsed.String(), nil
 }
 
-func writeModels(w http.ResponseWriter, models []config.Model) {
+func writeModels(w http.ResponseWriter, backends []config.BackendConfig) {
 	type modelEntry struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -320,12 +380,17 @@ func writeModels(w http.ResponseWriter, models []config.Model) {
 		Object: "list",
 		Data:   []modelEntry{},
 	}
-	for _, model := range models {
-		response.Data = append(response.Data, modelEntry{
-			ID:      model.ID,
-			Object:  "model",
-			OwnedBy: "google",
-		})
+	for _, bc := range backends {
+		if bc.Models.All {
+			continue
+		}
+		for _, model := range bc.Models.Models {
+			response.Data = append(response.Data, modelEntry{
+				ID:      model.ID,
+				Object:  "model",
+				OwnedBy: bc.Name,
+			})
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -360,6 +425,72 @@ func parseUsage(headers http.Header, body []byte) (usage.TokenUsage, string, boo
 		return usage.ParseSSE(body)
 	}
 	return usage.ParseJSON(body)
+}
+
+// rewriteJSONModel replaces the "model" field in a JSON object with localModel.
+// Returns the original bytes unchanged if parsing fails or no model field exists.
+func rewriteJSONModel(body []byte, localModel string) []byte {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if _, exists := payload["model"]; !exists {
+		return body
+	}
+	modelJSON, err := json.Marshal(localModel)
+	if err != nil {
+		return body
+	}
+	payload["model"] = json.RawMessage(modelJSON)
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return rewritten
+}
+
+// streamCopyJSONWithModelRewrite reads the full JSON body, rewrites the "model"
+// field to localModel, and writes the result to w.
+func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string) (int64, error) {
+	body, err := io.ReadAll(src)
+	if err != nil {
+		return 0, err
+	}
+	body = rewriteJSONModel(body, localModel)
+	_, _ = capture.Write(body)
+	n, writeErr := w.Write(body)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return int64(n), writeErr
+}
+
+// streamCopySSEWithModelRewrite processes an SSE stream line by line, rewriting
+// the "model" field in each data payload to localModel before forwarding.
+func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string) (int64, error) {
+	scanner := bufio.NewScanner(src)
+	var written int64
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			data := line[6:]
+			if data != "[DONE]" {
+				rewritten := rewriteJSONModel([]byte(data), localModel)
+				line = "data: " + string(rewritten)
+			}
+		}
+		lineBytes := append([]byte(line), '\n')
+		_, _ = capture.Write(lineBytes)
+		n, err := w.Write(lineBytes)
+		written += int64(n)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, scanner.Err()
 }
 
 func streamCopy(w http.ResponseWriter, src io.Reader, capture *limitedBuffer) (int64, error) {

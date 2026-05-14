@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/UnitVectorY-Labs/localmodelproxy/internal/auth"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/config"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/proxy"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/ui"
@@ -49,8 +49,6 @@ func run() error {
 	flag.StringVar(&flags.ConfigPath, "config", "", "Path to YAML config file (env: LOCALMODELPROXY_CONFIG)")
 	flag.StringVar(&flags.Host, "host", "", "Local bind host (default: 127.0.0.1)")
 	flag.IntVar(&flags.Port, "port", 0, "Local bind port (default: 8080)")
-	flag.StringVar(&flags.Project, "project", "", "Google Cloud project ID")
-	flag.StringVar(&flags.Location, "location", "", "Google Cloud location (default: global)")
 	flag.StringVar(&flags.UIMode, "ui", "", "UI mode: auto, tui, plain, jsonl")
 	flag.BoolVar(&flags.Verbose, "verbose", false, "Enable verbose diagnostics")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
@@ -77,24 +75,24 @@ func run() error {
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
 
-	tokens, err := auth.NewADCProvider(ctx)
+	metrics := proxy.NewMetrics()
+	handler, err := proxy.New(ctx, proxy.Options{
+		Config:    cfg,
+		Metrics:   metrics,
+		Verbose:   cfg.Verbose,
+		LogOutput: os.Stderr,
+	})
 	if err != nil {
 		return err
 	}
-
-	metrics := proxy.NewMetrics()
-	handler := proxy.New(proxy.Options{
-		Config:        cfg,
-		TokenProvider: tokens,
-		Metrics:       metrics,
-		Verbose:       cfg.Verbose,
-		LogOutput:     os.Stderr,
-	})
 
 	server := &http.Server{
 		Addr:              cfg.Address(),
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(_ net.Listener) context.Context {
+			return ctx
+		},
 	}
 
 	done := make(chan error, 1)
@@ -121,7 +119,7 @@ func run() error {
 }
 
 func shutdownServer(server *http.Server, done <-chan error) error {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -138,7 +136,7 @@ func shutdownServer(server *http.Server, done <-chan error) error {
 }
 
 func printHelp() {
-	fmt.Fprintf(os.Stderr, `localmodelproxy - Local Vertex AI Gemini OpenAI-compatible proxy
+	fmt.Fprintf(os.Stderr, `localmodelproxy - Local OpenAI-compatible proxy
 
 Usage:
   localmodelproxy [OPTIONS]
@@ -147,8 +145,6 @@ Options:
   --config PATH       Path to YAML config file (env: LOCALMODELPROXY_CONFIG)
   --host HOST         Local bind host (default: 127.0.0.1)
   --port PORT         Local bind port (default: 8080)
-  --project ID        Google Cloud project ID
-  --location REGION   Google Cloud location (default: global)
   --ui MODE           UI mode: auto, tui, plain, jsonl
   --verbose           Log each request to console with token info; disables TUI
   --version           Print version and exit
