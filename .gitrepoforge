@@ -6,8 +6,8 @@ config:
   language: go
   release: release-go
   justfile: true
-  status: wip
-  release_github: false
+  status: active
+  release_github: true
   codecov:
     enabled: false
   docs:
