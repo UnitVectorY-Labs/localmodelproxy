@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -248,7 +249,17 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	w.WriteHeader(resp.StatusCode)
 
 	responseCapture := &limitedBuffer{limit: captureLimit}
-	_, copyErr := streamCopy(w, resp.Body, responseCapture)
+	var copyErr error
+	if resp.StatusCode == http.StatusOK && record.Model != "" {
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/event-stream") {
+			_, copyErr = streamCopySSEWithModelRewrite(w, resp.Body, responseCapture, record.Model)
+		} else {
+			_, copyErr = streamCopyJSONWithModelRewrite(w, resp.Body, responseCapture, record.Model)
+		}
+	} else {
+		_, copyErr = streamCopy(w, resp.Body, responseCapture)
+	}
 	if parsedUsage, model, ok := parseUsage(resp.Header, responseCapture.Bytes()); ok {
 		record.Usage = parsedUsage
 		if model != "" {
@@ -411,6 +422,72 @@ func parseUsage(headers http.Header, body []byte) (usage.TokenUsage, string, boo
 		return usage.ParseSSE(body)
 	}
 	return usage.ParseJSON(body)
+}
+
+// rewriteJSONModel replaces the "model" field in a JSON object with localModel.
+// Returns the original bytes unchanged if parsing fails or no model field exists.
+func rewriteJSONModel(body []byte, localModel string) []byte {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if _, exists := payload["model"]; !exists {
+		return body
+	}
+	modelJSON, err := json.Marshal(localModel)
+	if err != nil {
+		return body
+	}
+	payload["model"] = json.RawMessage(modelJSON)
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return rewritten
+}
+
+// streamCopyJSONWithModelRewrite reads the full JSON body, rewrites the "model"
+// field to localModel, and writes the result to w.
+func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string) (int64, error) {
+	body, err := io.ReadAll(src)
+	if err != nil {
+		return 0, err
+	}
+	body = rewriteJSONModel(body, localModel)
+	_, _ = capture.Write(body)
+	n, writeErr := w.Write(body)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return int64(n), writeErr
+}
+
+// streamCopySSEWithModelRewrite processes an SSE stream line by line, rewriting
+// the "model" field in each data payload to localModel before forwarding.
+func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string) (int64, error) {
+	scanner := bufio.NewScanner(src)
+	var written int64
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			data := line[6:]
+			if data != "[DONE]" {
+				rewritten := rewriteJSONModel([]byte(data), localModel)
+				line = "data: " + string(rewritten)
+			}
+		}
+		lineBytes := append([]byte(line), '\n')
+		_, _ = capture.Write(lineBytes)
+		n, err := w.Write(lineBytes)
+		written += int64(n)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, scanner.Err()
 }
 
 func streamCopy(w http.ResponseWriter, src io.Reader, capture *limitedBuffer) (int64, error) {
