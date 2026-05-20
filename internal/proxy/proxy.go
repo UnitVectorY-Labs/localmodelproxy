@@ -399,7 +399,7 @@ func writeModels(w http.ResponseWriter, backends []config.BackendConfig) {
 
 func copyRequestHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Host") {
+		if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Host") || strings.EqualFold(key, "Accept-Encoding") {
 			continue
 		}
 		for _, value := range values {
