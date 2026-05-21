@@ -451,3 +451,52 @@ func TestStreamingResponseModelRewritten(t *testing.T) {
 		t.Fatalf("no SSE data chunk with model field found in response:\n%s", body)
 	}
 }
+
+func TestStreamingThoughtSignatureReinjected(t *testing.T) {
+	var requestCount int
+	var secondBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		body, _ := io.ReadAll(r.Body)
+		if requestCount == 2 {
+			_ = json.Unmarshal(body, &secondBody)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requestCount == 1 {
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"sig-1\"}}}]}}]}\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	handler := mustNew(t, Options{
+		Config:        testConfig([]config.Model{{ID: "google/gemini"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+		UpstreamBase:  upstream.URL,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"google/gemini","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first request status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"google/gemini","messages":[{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"bash","arguments":"{}"}}]}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second request status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	messages := secondBody["messages"].([]any)
+	assistant := messages[0].(map[string]any)
+	toolCalls := assistant["tool_calls"].([]any)
+	signature := thoughtSignature(toolCalls[0].(map[string]any))
+	if signature != "sig-1" {
+		t.Fatalf("thought signature was not reinjected, got %q in %#v", signature, secondBody)
+	}
+}
