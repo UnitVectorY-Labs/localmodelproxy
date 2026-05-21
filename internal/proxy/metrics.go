@@ -8,12 +8,13 @@ import (
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/usage"
 )
 
-const maxRecent = 20
+const maxRecent = 100
 
 type Metrics struct {
 	mu sync.RWMutex
 
 	totalRequests  int64
+	modelRequests  int64
 	active         int64
 	successes      int64
 	failures       int64
@@ -22,6 +23,7 @@ type Metrics struct {
 	thinkingTokens int64
 	cachedTokens   int64
 	totalTokens    int64
+	totalCostUSD   float64
 	statusCodes    map[int]int64
 	models         map[string]ModelStats
 	recent         []RequestRecord
@@ -34,9 +36,11 @@ type ModelStats struct {
 	ThinkingTokens int64
 	CachedTokens   int64
 	TotalTokens    int64
+	CostUSD        float64
 }
 
 type RequestRecord struct {
+	Sequence   int64
 	Method     string
 	Path       string
 	Model      string
@@ -44,11 +48,13 @@ type RequestRecord struct {
 	Duration   time.Duration
 	Error      string
 	Usage      usage.TokenUsage
+	CostUSD    float64
 	StartedAt  time.Time
 }
 
 type Snapshot struct {
 	TotalRequests  int64
+	ModelRequests  int64
 	Active         int64
 	Successes      int64
 	Failures       int64
@@ -57,6 +63,7 @@ type Snapshot struct {
 	ThinkingTokens int64
 	CachedTokens   int64
 	TotalTokens    int64
+	TotalCostUSD   float64
 	StatusCodes    map[int]int64
 	Models         map[string]ModelStats
 	Recent         []RequestRecord
@@ -102,6 +109,7 @@ func (m *Metrics) Finish(record *RequestRecord) {
 	m.thinkingTokens += record.Usage.ThinkingTokens
 	m.cachedTokens += record.Usage.CachedTokens
 	m.totalTokens += record.Usage.TotalTokens
+	m.totalCostUSD += record.CostUSD
 	if record.Model != "" {
 		stats := m.models[record.Model]
 		stats.Requests++
@@ -110,10 +118,13 @@ func (m *Metrics) Finish(record *RequestRecord) {
 		stats.ThinkingTokens += record.Usage.ThinkingTokens
 		stats.CachedTokens += record.Usage.CachedTokens
 		stats.TotalTokens += record.Usage.TotalTokens
+		stats.CostUSD += record.CostUSD
 		m.models[record.Model] = stats
 	}
 
-	if record.StatusCode >= 200 && record.StatusCode < 400 && record.Error == "" {
+	if isModelRequest(record) {
+		m.modelRequests++
+		record.Sequence = m.modelRequests
 		m.recent = append([]RequestRecord{*record}, m.recent...)
 		if len(m.recent) > maxRecent {
 			m.recent = m.recent[:maxRecent]
@@ -137,6 +148,7 @@ func (m *Metrics) Snapshot() Snapshot {
 
 	return Snapshot{
 		TotalRequests:  m.totalRequests,
+		ModelRequests:  m.modelRequests,
 		Active:         m.active,
 		Successes:      m.successes,
 		Failures:       m.failures,
@@ -145,10 +157,15 @@ func (m *Metrics) Snapshot() Snapshot {
 		ThinkingTokens: m.thinkingTokens,
 		CachedTokens:   m.cachedTokens,
 		TotalTokens:    m.totalTokens,
+		TotalCostUSD:   m.totalCostUSD,
 		StatusCodes:    statusCodes,
 		Models:         models,
 		Recent:         recent,
 	}
+}
+
+func isModelRequest(record *RequestRecord) bool {
+	return record.Path == "/v1/chat/completions" && record.Model != ""
 }
 
 func (s Snapshot) SortedModelNames() []string {

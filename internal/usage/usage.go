@@ -145,6 +145,11 @@ func normalize(u usageShape) TokenUsage {
 	if total == 0 {
 		total = input + output
 	}
+	if cached > input {
+		input = 0
+	} else {
+		input -= cached
+	}
 	return TokenUsage{
 		InputTokens:    input,
 		OutputTokens:   output,

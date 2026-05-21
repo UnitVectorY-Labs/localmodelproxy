@@ -146,6 +146,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		model := usage.ParseModel(bodyBytes)
+		record.Model = model
 		if model == "" {
 			record.StatusCode = http.StatusBadRequest
 			record.Error = "model field is required"
@@ -245,6 +246,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	}
 	req.ContentLength = contentLength
 	copyRequestHeaders(req.Header, r.Header)
+	if _, ok := r.Header["User-Agent"]; !ok {
+		req.Header["User-Agent"] = nil
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -277,6 +281,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		if model != "" {
 			record.Model = p.cfg.LocalModelID(model)
 		}
+		record.CostUSD = p.cfg.ModelCost(record.Model).RequestCost(
+			record.Usage.InputTokens,
+			record.Usage.OutputTokens,
+			record.Usage.CachedTokens,
+		)
 	}
 	if copyErr != nil {
 		record.Error = copyErr.Error()

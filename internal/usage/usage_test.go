@@ -17,7 +17,7 @@ func TestParseOpenAIDetailUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected usage")
 	}
-	if got.InputTokens != 10 || got.OutputTokens != 20 || got.ThinkingTokens != 7 || got.CachedTokens != 4 || got.TotalTokens != 30 {
+	if got.InputTokens != 6 || got.OutputTokens != 20 || got.ThinkingTokens != 7 || got.CachedTokens != 4 || got.TotalTokens != 30 {
 		t.Fatalf("unexpected parse: %#v", got)
 	}
 }
@@ -27,7 +27,7 @@ func TestParseGoogleStyleUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected usage")
 	}
-	if got.InputTokens != 11 || got.OutputTokens != 22 || got.ThinkingTokens != 5 || got.CachedTokens != 3 || got.TotalTokens != 38 {
+	if got.InputTokens != 8 || got.OutputTokens != 22 || got.ThinkingTokens != 5 || got.CachedTokens != 3 || got.TotalTokens != 38 {
 		t.Fatalf("unexpected parse: %#v", got)
 	}
 }

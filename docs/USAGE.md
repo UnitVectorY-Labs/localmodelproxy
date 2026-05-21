@@ -82,6 +82,7 @@ backends:
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
 | `ui.mode` | no | `auto` | `auto`, `tui`, `plain`, or `jsonl`. |
+| `ui.recent_requests` | no | `10` | Number of model request rows to show in the TUI recent list. Set to `0` to hide it. Maximum `100`. |
 
 `auto` uses the TUI when stdout is an interactive terminal and plain logs otherwise.
 
@@ -110,6 +111,10 @@ Backends can expose specific models:
 models:
   - id: local-model
     upstream_id: provider/model-name
+    cost:
+      input_per_million: 0.30
+      output_per_million: 2.50
+      cache_per_million: 0.075
 ```
 
 Or pass through all models:
@@ -124,6 +129,7 @@ Routing rules:
 - `models: all` acts as a fallback backend.
 - If more than one backend uses `models: all`, config order decides.
 - If no backend matches, the proxy returns an OpenAI-style 400 `model_not_found` error.
+- `cost` is optional. When present, values are interpreted as USD per 1 million tokens and are shown per request, per model, and in total.
 
 ## Authentication
 
@@ -198,7 +204,7 @@ When token exchange TLS verification is disabled, the app prints a startup warni
 
 The TUI and logs track:
 
-- input tokens
+- uncached input tokens
 - output tokens
 - thinking tokens
 - cached tokens
@@ -213,6 +219,8 @@ The proxy captures standard OpenAI-compatible usage fields such as:
 - `completion_tokens_details.reasoning_tokens`
 
 It also captures Google-style usage metadata when present.
+
+When cached tokens are reported, they are subtracted from the input token count before display and cost calculation so cached input is not double-counted.
 
 ## Verbose Mode
 

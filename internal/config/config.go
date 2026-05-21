@@ -14,10 +14,12 @@ import (
 var ErrUsage = errors.New("usage error")
 
 const (
-	DefaultHost     = "127.0.0.1"
-	DefaultPort     = 8080
-	DefaultLocation = "global"
-	DefaultUIMode   = "auto"
+	DefaultHost             = "127.0.0.1"
+	DefaultPort             = 8080
+	DefaultLocation         = "global"
+	DefaultUIMode           = "auto"
+	DefaultUIRecentRequests = 10
+	MaxUIRecentRequests     = 100
 )
 
 type Flags struct {
@@ -85,12 +87,20 @@ func (bm *BackendModels) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Model struct {
-	ID         string `yaml:"id"`
-	UpstreamID string `yaml:"upstream_id"`
+	ID         string    `yaml:"id"`
+	UpstreamID string    `yaml:"upstream_id"`
+	Cost       ModelCost `yaml:"cost"`
+}
+
+type ModelCost struct {
+	InputPerMillion  float64 `yaml:"input_per_million"`
+	OutputPerMillion float64 `yaml:"output_per_million"`
+	CachePerMillion  float64 `yaml:"cache_per_million"`
 }
 
 type UIConfig struct {
-	Mode string `yaml:"mode"`
+	Mode           string `yaml:"mode"`
+	RecentRequests int    `yaml:"recent_requests"`
 }
 
 func Load(flags Flags) (*Config, error) {
@@ -100,7 +110,8 @@ func Load(flags Flags) (*Config, error) {
 			Port: DefaultPort,
 		},
 		UI: UIConfig{
-			Mode: DefaultUIMode,
+			Mode:           DefaultUIMode,
+			RecentRequests: DefaultUIRecentRequests,
 		},
 	}
 
@@ -174,6 +185,9 @@ func (c *Config) Validate() error {
 	if c.UI.Mode == "" {
 		c.UI.Mode = DefaultUIMode
 	}
+	if c.UI.RecentRequests < 0 || c.UI.RecentRequests > MaxUIRecentRequests {
+		return usage(fmt.Sprintf("ui recent_requests must be between 0 and %d", MaxUIRecentRequests))
+	}
 
 	seen := make(map[string]bool)
 	for _, bc := range c.Backends {
@@ -207,6 +221,9 @@ func (c *Config) Validate() error {
 		for _, m := range bc.Models.Models {
 			if strings.TrimSpace(m.ID) == "" {
 				return usage(fmt.Sprintf("backend %q: models entries must include a non-empty id", bc.Name))
+			}
+			if m.Cost.InputPerMillion < 0 || m.Cost.OutputPerMillion < 0 || m.Cost.CachePerMillion < 0 {
+				return usage(fmt.Sprintf("backend %q model %q: costs must be non-negative", bc.Name, m.ID))
 			}
 		}
 	}
@@ -263,6 +280,38 @@ func (c *Config) LocalModelID(upstreamID string) string {
 		}
 	}
 	return upstreamID
+}
+
+func (c *Config) ModelCost(id string) ModelCost {
+	for _, bc := range c.Backends {
+		for _, m := range bc.Models.Models {
+			if m.ID == id {
+				return m.Cost
+			}
+		}
+	}
+	return ModelCost{}
+}
+
+func (c *Config) HasModelCosts() bool {
+	for _, bc := range c.Backends {
+		for _, m := range bc.Models.Models {
+			if !m.Cost.IsZero() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c ModelCost) IsZero() bool {
+	return c.InputPerMillion == 0 && c.OutputPerMillion == 0 && c.CachePerMillion == 0
+}
+
+func (c ModelCost) RequestCost(inputTokens, outputTokens, cachedTokens int64) float64 {
+	return float64(inputTokens)*c.InputPerMillion/1_000_000 +
+		float64(outputTokens)*c.OutputPerMillion/1_000_000 +
+		float64(cachedTokens)*c.CachePerMillion/1_000_000
 }
 
 // UpstreamModelID returns the upstream model ID that should be sent to the backend for the given local model ID.
