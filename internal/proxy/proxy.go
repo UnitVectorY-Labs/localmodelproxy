@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/auth"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/config"
@@ -40,12 +41,14 @@ type resolvedBackend struct {
 }
 
 type Proxy struct {
-	cfg       *config.Config
-	backends  []*resolvedBackend
-	metrics   *Metrics
-	client    *http.Client
-	verbose   bool
-	logOutput io.Writer
+	cfg             *config.Config
+	backends        []*resolvedBackend
+	metrics         *Metrics
+	client          *http.Client
+	verbose         bool
+	logOutput       io.Writer
+	thoughtMu       sync.RWMutex
+	thoughtByCallID map[string]string
 }
 
 // New creates a Proxy and initialises an auth provider for each configured backend.
@@ -90,12 +93,13 @@ func New(ctx context.Context, opts Options) (*Proxy, error) {
 	}
 
 	return &Proxy{
-		cfg:       opts.Config,
-		backends:  backends,
-		metrics:   opts.Metrics,
-		client:    client,
-		verbose:   opts.Verbose,
-		logOutput: logOut,
+		cfg:             opts.Config,
+		backends:        backends,
+		metrics:         opts.Metrics,
+		client:          client,
+		verbose:         opts.Verbose,
+		logOutput:       logOut,
+		thoughtByCallID: make(map[string]string),
 	}, nil
 }
 
@@ -221,7 +225,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		}()
 	}
 
-	body, localModel, err := p.prepareRequestBody(r, backend)
+	body, localModel, contentLength, err := p.prepareRequestBody(r, backend)
 	if err != nil {
 		record.StatusCode = http.StatusBadRequest
 		return err
@@ -239,6 +243,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		record.StatusCode = http.StatusBadGateway
 		return err
 	}
+	req.ContentLength = contentLength
 	copyRequestHeaders(req.Header, r.Header)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -260,9 +265,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	if resp.StatusCode == http.StatusOK && record.Model != "" {
 		contentType := resp.Header.Get("Content-Type")
 		if strings.Contains(contentType, "text/event-stream") {
-			_, copyErr = streamCopySSEWithModelRewrite(w, resp.Body, responseCapture, record.Model)
+			_, copyErr = streamCopySSEWithModelRewrite(w, resp.Body, responseCapture, record.Model, p.rememberThoughtSignaturesFromJSON)
 		} else {
-			_, copyErr = streamCopyJSONWithModelRewrite(w, resp.Body, responseCapture, record.Model)
+			_, copyErr = streamCopyJSONWithModelRewrite(w, resp.Body, responseCapture, record.Model, p.rememberThoughtSignaturesFromJSON)
 		}
 	} else {
 		_, copyErr = streamCopy(w, resp.Body, responseCapture)
@@ -280,30 +285,34 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	return nil
 }
 
-func (p *Proxy) prepareRequestBody(r *http.Request, backend *resolvedBackend) (io.ReadCloser, string, error) {
+func (p *Proxy) prepareRequestBody(r *http.Request, backend *resolvedBackend) (io.ReadCloser, string, int64, error) {
 	if r.Body == nil {
-		return io.NopCloser(bytes.NewReader(nil)), "", nil
+		return io.NopCloser(bytes.NewReader(nil)), "", 0, nil
 	}
 	defer r.Body.Close()
 
 	body, err := readLimited(r.Body, captureLimit)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 
 	localModel := usage.ParseModel(body)
 	if shouldRewriteModel(r) && localModel != "" {
 		rewritten, changed, err := rewriteModel(body, localModel, &backend.cfg)
 		if err != nil {
-			return nil, localModel, err
+			return nil, localModel, 0, err
 		}
 		if changed {
 			body = rewritten
 			r.ContentLength = int64(len(body))
 		}
 	}
+	if rewritten, changed := p.injectThoughtSignatures(body); changed {
+		body = rewritten
+		r.ContentLength = int64(len(body))
+	}
 
-	return io.NopCloser(bytes.NewReader(body)), localModel, nil
+	return io.NopCloser(bytes.NewReader(body)), localModel, int64(len(body)), nil
 }
 
 func shouldRewriteModel(r *http.Request) bool {
@@ -329,6 +338,92 @@ func rewriteModel(body []byte, localModel string, bc *config.BackendConfig) ([]b
 		return nil, false, fmt.Errorf("failed to rewrite request model: %w", err)
 	}
 	return rewritten, true, nil
+}
+
+func (p *Proxy) rememberThoughtSignaturesFromJSON(body []byte) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return
+	}
+	choices, _ := payload["choices"].([]any)
+	for _, choice := range choices {
+		choiceObj, _ := choice.(map[string]any)
+		for _, key := range []string{"message", "delta"} {
+			container, _ := choiceObj[key].(map[string]any)
+			toolCalls, _ := container["tool_calls"].([]any)
+			for _, toolCall := range toolCalls {
+				toolCallObj, _ := toolCall.(map[string]any)
+				id, _ := toolCallObj["id"].(string)
+				signature := thoughtSignature(toolCallObj)
+				if id == "" || signature == "" {
+					continue
+				}
+				p.thoughtMu.Lock()
+				p.thoughtByCallID[id] = signature
+				p.thoughtMu.Unlock()
+			}
+		}
+	}
+}
+
+func (p *Proxy) injectThoughtSignatures(body []byte) ([]byte, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body, false
+	}
+	messages, _ := payload["messages"].([]any)
+	changed := false
+	for _, message := range messages {
+		messageObj, _ := message.(map[string]any)
+		if role, _ := messageObj["role"].(string); role != "assistant" {
+			continue
+		}
+		toolCalls, _ := messageObj["tool_calls"].([]any)
+		for _, toolCall := range toolCalls {
+			toolCallObj, _ := toolCall.(map[string]any)
+			id, _ := toolCallObj["id"].(string)
+			if id == "" || thoughtSignature(toolCallObj) != "" {
+				continue
+			}
+			p.thoughtMu.RLock()
+			signature := p.thoughtByCallID[id]
+			p.thoughtMu.RUnlock()
+			if signature == "" {
+				continue
+			}
+			setThoughtSignature(toolCallObj, signature)
+			changed = true
+		}
+	}
+	if !changed {
+		return body, false
+	}
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return rewritten, true
+}
+
+func thoughtSignature(toolCall map[string]any) string {
+	extraContent, _ := toolCall["extra_content"].(map[string]any)
+	google, _ := extraContent["google"].(map[string]any)
+	signature, _ := google["thought_signature"].(string)
+	return signature
+}
+
+func setThoughtSignature(toolCall map[string]any, signature string) {
+	extraContent, _ := toolCall["extra_content"].(map[string]any)
+	if extraContent == nil {
+		extraContent = map[string]any{}
+		toolCall["extra_content"] = extraContent
+	}
+	google, _ := extraContent["google"].(map[string]any)
+	if google == nil {
+		google = map[string]any{}
+		extraContent["google"] = google
+	}
+	google["thought_signature"] = signature
 }
 
 func maskToken(token string) string {
@@ -399,7 +494,10 @@ func writeModels(w http.ResponseWriter, backends []config.BackendConfig) {
 
 func copyRequestHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Host") {
+		if strings.EqualFold(key, "Authorization") ||
+			strings.EqualFold(key, "Host") ||
+			strings.EqualFold(key, "Accept-Encoding") ||
+			strings.EqualFold(key, "Content-Length") {
 			continue
 		}
 		for _, value := range values {
@@ -451,12 +549,15 @@ func rewriteJSONModel(body []byte, localModel string) []byte {
 
 // streamCopyJSONWithModelRewrite reads the full JSON body, rewrites the "model"
 // field to localModel, and writes the result to w.
-func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string) (int64, error) {
+func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string, observeJSON func([]byte)) (int64, error) {
 	body, err := io.ReadAll(src)
 	if err != nil {
 		return 0, err
 	}
 	body = rewriteJSONModel(body, localModel)
+	if observeJSON != nil {
+		observeJSON(body)
+	}
 	_, _ = capture.Write(body)
 	n, writeErr := w.Write(body)
 	if flusher, ok := w.(http.Flusher); ok {
@@ -467,7 +568,7 @@ func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, captur
 
 // streamCopySSEWithModelRewrite processes an SSE stream line by line, rewriting
 // the "model" field in each data payload to localModel before forwarding.
-func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string) (int64, error) {
+func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string, observeJSON func([]byte)) (int64, error) {
 	scanner := bufio.NewScanner(src)
 	var written int64
 	for scanner.Scan() {
@@ -476,6 +577,9 @@ func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture
 			data := line[6:]
 			if data != "[DONE]" {
 				rewritten := rewriteJSONModel([]byte(data), localModel)
+				if observeJSON != nil {
+					observeJSON(rewritten)
+				}
 				line = "data: " + string(rewritten)
 			}
 		}
