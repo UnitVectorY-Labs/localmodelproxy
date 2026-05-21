@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -208,6 +209,112 @@ func TestForwardStripsV1AndAuthorization(t *testing.T) {
 	snapshot := metrics.Snapshot()
 	if snapshot.TotalTokens != 3 || snapshot.Models["gemini-3.1-flash-lite-preview"].Requests != 1 {
 		t.Fatalf("usage was not aggregated: %#v", snapshot)
+	}
+}
+
+func TestForwardSetsRewrittenContentLength(t *testing.T) {
+	var seenContentLength int64
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenContentLength = r.ContentLength
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"upstream/heavy-model-v2","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer upstream.Close()
+
+	handler := mustNew(t, Options{
+		Config:        testConfig([]config.Model{{ID: "my-local-model", UpstreamID: "upstream/heavy-model-v2"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+		UpstreamBase:  upstream.URL,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"my-local-model"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Length", "999")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if seenContentLength != int64(len(seenBody)) {
+		t.Fatalf("upstream ContentLength = %d, want %d for body %s", seenContentLength, len(seenBody), seenBody)
+	}
+	if !strings.Contains(string(seenBody), `"model":"upstream/heavy-model-v2"`) {
+		t.Fatalf("request body was not rewritten upstream: %s", seenBody)
+	}
+}
+
+func TestCopyRequestHeadersSkipsManagedHeaders(t *testing.T) {
+	src := http.Header{}
+	src.Set("Authorization", "Bearer caller")
+	src.Set("Host", "example.test")
+	src.Set("Accept-Encoding", "br")
+	src.Set("Content-Length", "999")
+	src.Set("Content-Type", "application/json")
+
+	dst := http.Header{}
+	copyRequestHeaders(dst, src)
+
+	for _, key := range []string{"Authorization", "Host", "Accept-Encoding", "Content-Length"} {
+		if got := dst.Get(key); got != "" {
+			t.Fatalf("expected %s to be skipped, got %q", key, got)
+		}
+	}
+	if got := dst.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected Content-Type to be copied, got %q", got)
+	}
+}
+
+func TestForwardHandlesGzippedJSONWhenCallerSendsAcceptEncoding(t *testing.T) {
+	var seenAcceptEncoding string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAcceptEncoding = r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte(`{"model":"upstream/heavy-model-v2","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`))
+		_ = gz.Close()
+	}))
+	defer upstream.Close()
+
+	metrics := NewMetrics()
+	handler := mustNew(t, Options{
+		Config:        testConfig([]config.Model{{ID: "my-local-model", UpstreamID: "upstream/heavy-model-v2"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       metrics,
+		UpstreamBase:  upstream.URL,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"my-local-model"}`))
+	req.Header.Set("Accept-Encoding", "br")
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if seenAcceptEncoding == "br" {
+		t.Fatalf("caller Accept-Encoding was forwarded upstream")
+	}
+	if rec.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("proxy response should not advertise gzip after transport decompression")
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("proxy did not return plain JSON: %v body=%q", err, rec.Body.String())
+	}
+	if body.Model != "my-local-model" {
+		t.Fatalf("expected rewritten response model %q, got %q", "my-local-model", body.Model)
+	}
+	snapshot := metrics.Snapshot()
+	if snapshot.TotalTokens != 5 || snapshot.Models["my-local-model"].Requests != 1 {
+		t.Fatalf("usage was not aggregated from decompressed body: %#v", snapshot)
 	}
 }
 

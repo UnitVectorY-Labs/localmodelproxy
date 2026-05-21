@@ -221,7 +221,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		}()
 	}
 
-	body, localModel, err := p.prepareRequestBody(r, backend)
+	body, localModel, contentLength, err := p.prepareRequestBody(r, backend)
 	if err != nil {
 		record.StatusCode = http.StatusBadRequest
 		return err
@@ -239,6 +239,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		record.StatusCode = http.StatusBadGateway
 		return err
 	}
+	req.ContentLength = contentLength
 	copyRequestHeaders(req.Header, r.Header)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -280,22 +281,22 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	return nil
 }
 
-func (p *Proxy) prepareRequestBody(r *http.Request, backend *resolvedBackend) (io.ReadCloser, string, error) {
+func (p *Proxy) prepareRequestBody(r *http.Request, backend *resolvedBackend) (io.ReadCloser, string, int64, error) {
 	if r.Body == nil {
-		return io.NopCloser(bytes.NewReader(nil)), "", nil
+		return io.NopCloser(bytes.NewReader(nil)), "", 0, nil
 	}
 	defer r.Body.Close()
 
 	body, err := readLimited(r.Body, captureLimit)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 
 	localModel := usage.ParseModel(body)
 	if shouldRewriteModel(r) && localModel != "" {
 		rewritten, changed, err := rewriteModel(body, localModel, &backend.cfg)
 		if err != nil {
-			return nil, localModel, err
+			return nil, localModel, 0, err
 		}
 		if changed {
 			body = rewritten
@@ -303,7 +304,7 @@ func (p *Proxy) prepareRequestBody(r *http.Request, backend *resolvedBackend) (i
 		}
 	}
 
-	return io.NopCloser(bytes.NewReader(body)), localModel, nil
+	return io.NopCloser(bytes.NewReader(body)), localModel, int64(len(body)), nil
 }
 
 func shouldRewriteModel(r *http.Request) bool {
@@ -399,7 +400,10 @@ func writeModels(w http.ResponseWriter, backends []config.BackendConfig) {
 
 func copyRequestHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Host") || strings.EqualFold(key, "Accept-Encoding") {
+		if strings.EqualFold(key, "Authorization") ||
+			strings.EqualFold(key, "Host") ||
+			strings.EqualFold(key, "Accept-Encoding") ||
+			strings.EqualFold(key, "Content-Length") {
 			continue
 		}
 		for _, value := range values {
