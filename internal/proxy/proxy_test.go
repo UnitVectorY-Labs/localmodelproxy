@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,6 +210,152 @@ func TestForwardStripsV1AndAuthorization(t *testing.T) {
 	snapshot := metrics.Snapshot()
 	if snapshot.TotalTokens != 3 || snapshot.Models["gemini-3.1-flash-lite-preview"].Requests != 1 {
 		t.Fatalf("usage was not aggregated: %#v", snapshot)
+	}
+}
+
+func TestForwardPreservesCallerUserAgentOnly(t *testing.T) {
+	var seenUserAgents []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenUserAgents = append(seenUserAgents, r.Header.Get("User-Agent"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"google/gemini","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	handler := mustNew(t, Options{
+		Config:        testConfig([]config.Model{{ID: "google/gemini"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+		UpstreamBase:  upstream.URL,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"google/gemini"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"google/gemini"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "original-app/1.0")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	if len(seenUserAgents) != 2 {
+		t.Fatalf("expected two upstream requests, got %d", len(seenUserAgents))
+	}
+	if seenUserAgents[0] != "" {
+		t.Fatalf("expected no synthetic user-agent, got %q", seenUserAgents[0])
+	}
+	if seenUserAgents[1] != "original-app/1.0" {
+		t.Fatalf("expected caller user-agent to pass through, got %q", seenUserAgents[1])
+	}
+}
+
+func TestRecentRequestsOnlyIncludeModelCallsIncludingFailures(t *testing.T) {
+	metrics := NewMetrics()
+	handler := mustNew(t, Options{
+		Config:        testConfig([]config.Model{{ID: "google/gemini"}}),
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       metrics,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected models status: %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"unknown"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected chat status: %d", rec.Code)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot.TotalRequests != 2 || snapshot.ModelRequests != 1 {
+		t.Fatalf("unexpected request totals: %#v", snapshot)
+	}
+	if len(snapshot.Recent) != 1 {
+		t.Fatalf("expected one recent model request, got %#v", snapshot.Recent)
+	}
+	if snapshot.Recent[0].Path != "/v1/chat/completions" || snapshot.Recent[0].Model != "unknown" || snapshot.Recent[0].StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected recent request: %#v", snapshot.Recent[0])
+	}
+	if snapshot.Recent[0].Sequence != 1 {
+		t.Fatalf("expected first model request sequence to be 1, got %d", snapshot.Recent[0].Sequence)
+	}
+}
+
+func TestRecentRequestSequenceIsMonotonic(t *testing.T) {
+	metrics := NewMetrics()
+	for i := 0; i < 12; i++ {
+		record := metrics.Begin(http.MethodPost, "/v1/chat/completions")
+		record.Model = "model"
+		record.StatusCode = http.StatusOK
+		metrics.Finish(record)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot.ModelRequests != 12 {
+		t.Fatalf("expected 12 model requests, got %d", snapshot.ModelRequests)
+	}
+	if len(snapshot.Recent) != 12 {
+		t.Fatalf("expected 12 recent requests, got %d", len(snapshot.Recent))
+	}
+	if snapshot.Recent[0].Sequence != 12 || snapshot.Recent[1].Sequence != 11 {
+		t.Fatalf("expected newest requests first with monotonic sequence, got %#v", snapshot.Recent[:2])
+	}
+}
+
+func TestCostAggregatesPerRequestModelAndTotal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"priced","usage":{"prompt_tokens":1000,"completion_tokens":2000,"total_tokens":3000,"prompt_tokens_details":{"cached_tokens":250}}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig([]config.Model{{
+		ID:   "priced",
+		Cost: config.ModelCost{InputPerMillion: 1, OutputPerMillion: 2, CachePerMillion: 0.5},
+	}})
+	metrics := NewMetrics()
+	handler := mustNew(t, Options{
+		Config:        cfg,
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       metrics,
+		UpstreamBase:  upstream.URL,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"priced"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	snapshot := metrics.Snapshot()
+	want := 750.0/1_000_000 + 2*2000.0/1_000_000 + 0.5*250.0/1_000_000
+	if math.Abs(snapshot.TotalCostUSD-want) > 0.0000001 {
+		t.Fatalf("unexpected total cost: got %.10f want %.10f", snapshot.TotalCostUSD, want)
+	}
+	if math.Abs(snapshot.Models["priced"].CostUSD-want) > 0.0000001 {
+		t.Fatalf("unexpected model cost: %#v want %.10f", snapshot.Models["priced"], want)
+	}
+	if got := snapshot.Recent[0].CostUSD; math.Abs(got-want) > 0.0000001 {
+		t.Fatalf("unexpected request cost: got %.10f want %.10f", got, want)
+	}
+	if snapshot.InputTokens != 750 || snapshot.CachedTokens != 250 {
+		t.Fatalf("expected cached tokens to be split out from input: %#v", snapshot)
 	}
 }
 

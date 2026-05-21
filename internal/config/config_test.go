@@ -56,9 +56,61 @@ ui:
 	if cfg.Server.Port != 9100 || cfg.UI.Mode != "jsonl" {
 		t.Fatalf("flags did not override yaml: %#v", cfg)
 	}
+	if cfg.UI.RecentRequests != DefaultUIRecentRequests {
+		t.Fatalf("unexpected recent requests default: %d", cfg.UI.RecentRequests)
+	}
 	all := cfg.AllModels()
 	if len(all) != 1 || all[0].ID != "google/gemini-2.5-flash" {
 		t.Fatalf("unexpected models: %#v", all)
+	}
+}
+
+func TestLoadUIRecentRequests(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(`
+ui:
+  mode: tui
+  recent_requests: 0
+`)
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(Flags{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.UI.RecentRequests != 0 {
+		t.Fatalf("expected recent requests off, got %d", cfg.UI.RecentRequests)
+	}
+}
+
+func TestRejectsInvalidUIRecentRequests(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Host: DefaultHost, Port: DefaultPort},
+		UI:     UIConfig{Mode: DefaultUIMode, RecentRequests: MaxUIRecentRequests + 1},
+	}
+	if err := cfg.Validate(); !errors.Is(err, ErrUsage) {
+		t.Fatalf("expected usage error, got %v", err)
+	}
+}
+
+func TestModelCost(t *testing.T) {
+	cfg := &Config{
+		Backends: []BackendConfig{{
+			Name: "priced",
+			Models: BackendModels{Models: []Model{{
+				ID:   "model-a",
+				Cost: ModelCost{InputPerMillion: 1, OutputPerMillion: 2, CachePerMillion: 0.5},
+			}}},
+		}},
+	}
+	if !cfg.HasModelCosts() {
+		t.Fatal("expected model costs")
+	}
+	if got := cfg.ModelCost("model-a").RequestCost(1_000_000, 1_000_000, 1_000_000); got != 3.5 {
+		t.Fatalf("unexpected request cost: %f", got)
 	}
 }
 

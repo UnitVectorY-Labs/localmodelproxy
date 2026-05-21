@@ -35,6 +35,7 @@ server:
 
 ui:
   mode: auto
+  recent_requests: 10
 
 backends:
   - name: cloud
@@ -46,6 +47,10 @@ backends:
     models:
       - id: gemini-3.1-flash-lite-preview
         upstream_id: google/gemini-3.1-flash-lite-preview
+        cost:
+          input_per_million: 0.30
+          output_per_million: 2.50
+          cache_per_million: 0.075
 ```
 
 Authenticate:

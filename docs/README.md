@@ -22,7 +22,7 @@ Use it when you want to:
 - Use local application credentials without exposing them to every tool
 - Route different model names to different OpenAI-compatible backends
 - Combine local and remote models behind one local base URL
-- See input, output, thinking, cached, and total token usage as requests flow through
+- See uncached input, output, thinking, cached, total token usage, and optional costs as requests flow through
 - Debug local HTTPS backends with explicit, visible unsafe TLS warnings
 
 ## Shape of the app
@@ -32,7 +32,7 @@ Use it when you want to:
 - `GET /v1/models` — always returns the configured models list
 - `POST /v1/chat/completions` — validated against configured model IDs and forwarded to the matching backend
 
-The proxy selects a backend by inspecting the request model, validates it against configured model IDs (returning a 400 `model_not_found` error if not found), forwards the request transparently, rewrites model aliases when configured, applies the backend's authentication method, and aggregates token usage from the response.
+The proxy selects a backend by inspecting the request model, validates it against configured model IDs (returning a 400 `model_not_found` error if not found), forwards the request transparently, rewrites model aliases when configured, applies the backend's authentication method, and aggregates token usage and optional cost from the response.
 
 ## Documentation
 
