@@ -213,6 +213,34 @@ func TestForwardStripsV1AndAuthorization(t *testing.T) {
 	}
 }
 
+func TestForwardAllowsBackendInsecureSkipVerify(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"tls-model","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig([]config.Model{{ID: "tls-model"}})
+	cfg.Backends[0].Type = "openai_compatible"
+	cfg.Backends[0].BaseURL = upstream.URL
+	cfg.Backends[0].InsecureSkipVerify = true
+
+	handler := mustNew(t, Options{
+		Config:        cfg,
+		TokenProvider: StaticTokenProvider("token"),
+		Metrics:       NewMetrics(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"tls-model"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestForwardPreservesCallerUserAgentOnly(t *testing.T) {
 	var seenUserAgents []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
