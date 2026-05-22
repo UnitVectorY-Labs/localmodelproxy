@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,13 +39,13 @@ type resolvedBackend struct {
 	cfg    config.BackendConfig
 	tokens auth.TokenProvider
 	base   string // trimmed base URL
+	client *http.Client
 }
 
 type Proxy struct {
 	cfg             *config.Config
 	backends        []*resolvedBackend
 	metrics         *Metrics
-	client          *http.Client
 	verbose         bool
 	logOutput       io.Writer
 	thoughtMu       sync.RWMutex
@@ -56,9 +57,6 @@ type Proxy struct {
 // overrides for all backends (used in tests).
 func New(ctx context.Context, opts Options) (*Proxy, error) {
 	client := opts.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	logOut := opts.LogOutput
 	if logOut == nil {
 		logOut = os.Stderr
@@ -89,6 +87,7 @@ func New(ctx context.Context, opts Options) (*Proxy, error) {
 			cfg:    bc,
 			tokens: tokens,
 			base:   strings.TrimRight(base, "/"),
+			client: backendHTTPClient(client, bc),
 		})
 	}
 
@@ -96,11 +95,23 @@ func New(ctx context.Context, opts Options) (*Proxy, error) {
 		cfg:             opts.Config,
 		backends:        backends,
 		metrics:         opts.Metrics,
-		client:          client,
 		verbose:         opts.Verbose,
 		logOutput:       logOut,
 		thoughtByCallID: make(map[string]string),
 	}, nil
+}
+
+func backendHTTPClient(override *http.Client, bc config.BackendConfig) *http.Client {
+	if override != nil {
+		return override
+	}
+	if !bc.InsecureSkipVerify {
+		return http.DefaultClient
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-opt-in
+	return &http.Client{Transport: transport}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -253,7 +264,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := p.client.Do(req)
+	resp, err := backend.client.Do(req)
 	if err != nil {
 		record.StatusCode = http.StatusBadGateway
 		return err
