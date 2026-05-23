@@ -27,10 +27,7 @@ Override it with `--config` or `LOCALMODELPROXY_CONFIG`.
 | Flag | Argument | Notes |
 |------|----------|-------|
 | `--config` | path | YAML config path. Overrides `LOCALMODELPROXY_CONFIG` and the default `~/.localmodelproxy`. |
-| `--host` | host | Local bind host. Defaults to `127.0.0.1`. Non-loopback hosts are rejected. |
-| `--port` | port | Local bind port. Defaults to `8080`. |
-| `--ui` | mode | `auto`, `tui`, `plain`, or `jsonl`. Defaults to `auto`. |
-| `--verbose` | | Logs each forwarded request as a line to stderr, including masked token info. Forces plain output mode (no TUI). |
+| `--log` | path | Appends request and response payload logs to the specified file. |
 | `--version` | | Prints version and exits. |
 | `--help` | | Prints help and exits. |
 
@@ -57,7 +54,7 @@ server:
   port: 8080
 
 ui:
-  mode: auto
+  recent_requests: 10
 
 backends:
   - name: backend-name
@@ -81,10 +78,9 @@ backends:
 
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
-| `ui.mode` | no | `auto` | `auto`, `tui`, `plain`, or `jsonl`. |
 | `ui.recent_requests` | no | `10` | Number of model request rows to show in the TUI recent list. Set to `0` to hide it. Maximum `100`. |
 
-`auto` uses the TUI when stdout is an interactive terminal and plain logs otherwise.
+The app uses the TUI when stdout is an interactive terminal. When stdout is not a terminal, it prints plain startup and summary lines.
 
 ## Backends
 
@@ -222,6 +218,8 @@ It also captures Google-style usage metadata when present.
 
 When cached tokens are reported, they are subtracted from the input token count before display and cost calculation so cached input is not double-counted.
 
-## Verbose Mode
+## Request/Response Log
 
-When `--verbose` is set, each forwarded request is logged as a single line to stderr. The line includes the model, backend, and masked token details (useful for inspecting OAuth token exchanges). Verbose mode forces plain output — the TUI is not used.
+Use `--log PATH` to append request payloads, response payloads, streaming response chunks, and pre-forward failures to a file while keeping the TUI active.
+
+Request log entries are timestamped and include the model, backend, and full upstream token value. Store the log file accordingly.

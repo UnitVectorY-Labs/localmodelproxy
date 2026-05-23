@@ -34,7 +34,6 @@ server:
   port: 8080
 
 ui:
-  mode: auto
   recent_requests: 10
 
 backends:
@@ -197,9 +196,6 @@ This configuration combines Google Cloud, a local no-auth backend, and a hosted 
 server:
   host: 127.0.0.1
   port: 8080
-
-ui:
-  mode: auto
 
 backends:
   - name: cloud

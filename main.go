@@ -43,14 +43,12 @@ func main() {
 
 func run() error {
 	flags := config.Flags{}
+	var logPath string
 	var showVersion bool
 	var showHelp bool
 
 	flag.StringVar(&flags.ConfigPath, "config", "", "Path to YAML config file (env: LOCALMODELPROXY_CONFIG)")
-	flag.StringVar(&flags.Host, "host", "", "Local bind host (default: 127.0.0.1)")
-	flag.IntVar(&flags.Port, "port", 0, "Local bind port (default: 8080)")
-	flag.StringVar(&flags.UIMode, "ui", "", "UI mode: auto, tui, plain, jsonl")
-	flag.BoolVar(&flags.Verbose, "verbose", false, "Enable verbose diagnostics")
+	flag.StringVar(&logPath, "log", "", "Write request/response payload logs to this file")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
 	flag.BoolVar(&showHelp, "help", false, "Show help")
 	flag.Parse()
@@ -68,6 +66,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var logOutput *os.File
+	if logPath != "" {
+		logOutput, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return fmt.Errorf("failed to open log file %s: %w", logPath, err)
+		}
+		defer logOutput.Close()
+	}
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -79,8 +85,7 @@ func run() error {
 	handler, err := proxy.New(ctx, proxy.Options{
 		Config:    cfg,
 		Metrics:   metrics,
-		Verbose:   cfg.Verbose,
-		LogOutput: os.Stderr,
+		LogOutput: logOutput,
 	})
 	if err != nil {
 		return err
@@ -119,7 +124,7 @@ func run() error {
 }
 
 func shutdownServer(server *http.Server, done <-chan error) error {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -143,10 +148,7 @@ Usage:
 
 Options:
   --config PATH       Path to YAML config file (env: LOCALMODELPROXY_CONFIG)
-  --host HOST         Local bind host (default: 127.0.0.1)
-  --port PORT         Local bind port (default: 8080)
-  --ui MODE           UI mode: auto, tui, plain, jsonl
-  --verbose           Log each request to console with token info; disables TUI
+  --log PATH          Write request and response payload logs to PATH
   --version           Print version and exit
   --help              Print help and exit
 

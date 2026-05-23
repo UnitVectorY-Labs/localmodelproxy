@@ -23,7 +23,7 @@ func TestLoadDefaultsNoConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAndFlagOverrides(t *testing.T) {
+func TestLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := []byte(`
@@ -38,23 +38,17 @@ backends:
       type: none
     models:
       - id: google/gemini-2.5-flash
-ui:
-  mode: plain
 `)
 	if err := os.WriteFile(path, content, 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(Flags{
-		ConfigPath: path,
-		Port:       9100,
-		UIMode:     "jsonl",
-	})
+	cfg, err := Load(Flags{ConfigPath: path})
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.Server.Port != 9100 || cfg.UI.Mode != "jsonl" {
-		t.Fatalf("flags did not override yaml: %#v", cfg)
+	if cfg.Server.Port != 9000 {
+		t.Fatalf("unexpected server port: %#v", cfg)
 	}
 	if cfg.UI.RecentRequests != DefaultUIRecentRequests {
 		t.Fatalf("unexpected recent requests default: %d", cfg.UI.RecentRequests)
@@ -70,7 +64,6 @@ func TestLoadUIRecentRequests(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	content := []byte(`
 ui:
-  mode: tui
   recent_requests: 0
 `)
 	if err := os.WriteFile(path, content, 0600); err != nil {
@@ -89,7 +82,7 @@ ui:
 func TestRejectsInvalidUIRecentRequests(t *testing.T) {
 	cfg := Config{
 		Server: ServerConfig{Host: DefaultHost, Port: DefaultPort},
-		UI:     UIConfig{Mode: DefaultUIMode, RecentRequests: MaxUIRecentRequests + 1},
+		UI:     UIConfig{RecentRequests: MaxUIRecentRequests + 1},
 	}
 	if err := cfg.Validate(); !errors.Is(err, ErrUsage) {
 		t.Fatalf("expected usage error, got %v", err)
@@ -186,9 +179,16 @@ backends:
 	}
 }
 
-func TestRejectsNonLoopback(t *testing.T) {
+func TestRejectsNonLoopbackConfig(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	_, err := Load(Flags{Host: "0.0.0.0"})
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+server:
+  host: 0.0.0.0
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(Flags{ConfigPath: path})
 	if !errors.Is(err, ErrUsage) {
 		t.Fatalf("expected usage error, got %v", err)
 	}
@@ -310,7 +310,7 @@ func TestValidateMissingBackendName(t *testing.T) {
 		Backends: []BackendConfig{
 			{Name: "", Type: "openai_compatible", BaseURL: "http://x", Auth: AuthConfig{Type: "none"}},
 		},
-		UI: UIConfig{Mode: DefaultUIMode},
+		UI: UIConfig{},
 	}
 	if err := cfg.Validate(); !errors.Is(err, ErrUsage) {
 		t.Fatalf("expected usage error, got %v", err)
@@ -324,7 +324,7 @@ func TestValidateDuplicateBackendName(t *testing.T) {
 			{Name: "dup", Type: "openai_compatible", BaseURL: "http://x", Auth: AuthConfig{Type: "none"}},
 			{Name: "dup", Type: "openai_compatible", BaseURL: "http://y", Auth: AuthConfig{Type: "none"}},
 		},
-		UI: UIConfig{Mode: DefaultUIMode},
+		UI: UIConfig{},
 	}
 	if err := cfg.Validate(); !errors.Is(err, ErrUsage) {
 		t.Fatalf("expected usage error, got %v", err)
