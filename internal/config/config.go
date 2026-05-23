@@ -17,24 +17,18 @@ const (
 	DefaultHost             = "127.0.0.1"
 	DefaultPort             = 8080
 	DefaultLocation         = "global"
-	DefaultUIMode           = "auto"
 	DefaultUIRecentRequests = 10
 	MaxUIRecentRequests     = 100
 )
 
 type Flags struct {
 	ConfigPath string
-	Host       string
-	Port       int
-	UIMode     string
-	Verbose    bool
 }
 
 type Config struct {
 	Server     ServerConfig    `yaml:"server"`
 	Backends   []BackendConfig `yaml:"backends"`
 	UI         UIConfig        `yaml:"ui"`
-	Verbose    bool            `yaml:"verbose"`
 	SourcePath string          `yaml:"-"`
 }
 
@@ -99,8 +93,7 @@ type ModelCost struct {
 }
 
 type UIConfig struct {
-	Mode           string `yaml:"mode"`
-	RecentRequests int    `yaml:"recent_requests"`
+	RecentRequests int `yaml:"recent_requests"`
 }
 
 func Load(flags Flags) (*Config, error) {
@@ -110,7 +103,6 @@ func Load(flags Flags) (*Config, error) {
 			Port: DefaultPort,
 		},
 		UI: UIConfig{
-			Mode:           DefaultUIMode,
 			RecentRequests: DefaultUIRecentRequests,
 		},
 	}
@@ -121,19 +113,6 @@ func Load(flags Flags) (*Config, error) {
 			return nil, err
 		}
 		cfg.SourcePath = path
-	}
-
-	if flags.Host != "" {
-		cfg.Server.Host = flags.Host
-	}
-	if flags.Port != 0 {
-		cfg.Server.Port = flags.Port
-	}
-	if flags.UIMode != "" {
-		cfg.UI.Mode = flags.UIMode
-	}
-	if flags.Verbose {
-		cfg.Verbose = true
 	}
 
 	// Apply defaults and env-var expansion to each backend.
@@ -176,14 +155,6 @@ func (c *Config) Validate() error {
 	}
 	if !IsLoopbackHost(c.Server.Host) {
 		return usage(fmt.Sprintf("refusing to bind to non-loopback host %q", c.Server.Host))
-	}
-	switch c.UI.Mode {
-	case "", "auto", "tui", "plain", "jsonl":
-	default:
-		return usage("ui mode must be one of auto, tui, plain, jsonl")
-	}
-	if c.UI.Mode == "" {
-		c.UI.Mode = DefaultUIMode
 	}
 	if c.UI.RecentRequests < 0 || c.UI.RecentRequests > MaxUIRecentRequests {
 		return usage(fmt.Sprintf("ui recent_requests must be between 0 and %d", MaxUIRecentRequests))

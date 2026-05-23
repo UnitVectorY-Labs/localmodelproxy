@@ -1,8 +1,8 @@
 package ui
 
 import (
+	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -24,10 +24,11 @@ type Renderer struct {
 	errOut  io.Writer
 	program *tea.Program
 	cancel  context.CancelFunc
+	input   context.CancelFunc
 }
 
 func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config, metrics *proxy.Metrics, out, errOut *os.File) *Renderer {
-	mode := resolveMode(cfg, out)
+	mode := resolveMode(out)
 	renderer := &Renderer{
 		cfg:     cfg,
 		metrics: metrics,
@@ -44,16 +45,20 @@ func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config,
 		go func() {
 			_, _ = renderer.program.Run()
 		}()
-	case "plain", "jsonl":
+	case "plain":
 		fmt.Fprintf(errOut, "localmodelproxy listening on http://%s/v1 config=%s\n", cfg.Address(), configSource(cfg))
 		for _, model := range cfg.AllModels() {
 			fmt.Fprintf(errOut, "model %s\n", model.ID)
 		}
+		renderer.input = startPlainLineListener(ctx, shutdown, os.Stdin)
 	}
 	return renderer
 }
 
 func (r *Renderer) Stop() {
+	if r.input != nil {
+		r.input()
+	}
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -64,24 +69,6 @@ func (r *Renderer) Stop() {
 
 func (r *Renderer) FinalSummary() {
 	snapshot := r.metrics.Snapshot()
-	if r.mode == "jsonl" {
-		event := map[string]any{
-			"event":           "summary",
-			"requests":        snapshot.TotalRequests,
-			"successes":       snapshot.Successes,
-			"failures":        snapshot.Failures,
-			"input_tokens":    snapshot.InputTokens,
-			"output_tokens":   snapshot.OutputTokens,
-			"thinking_tokens": snapshot.ThinkingTokens,
-			"cached_tokens":   snapshot.CachedTokens,
-			"total_tokens":    snapshot.TotalTokens,
-		}
-		if r.cfg.HasModelCosts() || snapshot.TotalCostUSD > 0 {
-			event["total_cost_usd"] = snapshot.TotalCostUSD
-		}
-		_ = json.NewEncoder(r.errOut).Encode(event)
-		return
-	}
 	if r.mode != "tui" {
 		fmt.Fprintf(r.errOut, "summary requests=%d successes=%d failures=%d input_tokens=%d output_tokens=%d thinking_tokens=%d cached_tokens=%d total_tokens=%d",
 			snapshot.TotalRequests, snapshot.Successes, snapshot.Failures, snapshot.InputTokens, snapshot.OutputTokens, snapshot.ThinkingTokens, snapshot.CachedTokens, snapshot.TotalTokens)
@@ -92,20 +79,50 @@ func (r *Renderer) FinalSummary() {
 	}
 }
 
-func resolveMode(cfg *config.Config, out *os.File) string {
-	if cfg.Verbose {
-		if cfg.UI.Mode == "jsonl" {
-			return "jsonl"
-		}
-		return "plain"
+func resolveMode(out *os.File) string {
+	if term.IsTerminal(int(out.Fd())) {
+		return "tui"
 	}
-	if cfg.UI.Mode == "" || cfg.UI.Mode == "auto" {
-		if term.IsTerminal(int(out.Fd())) {
-			return "tui"
-		}
-		return "plain"
+	return "plain"
+}
+
+func startPlainLineListener(ctx context.Context, shutdown context.CancelFunc, in *os.File) context.CancelFunc {
+	if shutdown == nil || in == nil || !term.IsTerminal(int(in.Fd())) {
+		return nil
 	}
-	return cfg.UI.Mode
+
+	listenCtx, cancel := context.WithCancel(ctx)
+	lines := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(in)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-listenCtx.Done():
+				return
+			}
+		}
+		close(lines)
+	}()
+	go func() {
+		defer cancel()
+		for {
+			select {
+			case <-listenCtx.Done():
+				return
+			case line, ok := <-lines:
+				if !ok {
+					return
+				}
+				switch strings.TrimSpace(line) {
+				case "q", "Q":
+					shutdown()
+					return
+				}
+			}
+		}
+	}()
+	return cancel
 }
 
 type tickMsg time.Time
@@ -344,9 +361,6 @@ func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool) [][]
 	modelNames := make(map[string]struct{})
 	for _, model := range cfg.AllModels() {
 		modelNames[model.ID] = struct{}{}
-	}
-	for model := range snapshot.Models {
-		modelNames[model] = struct{}{}
 	}
 
 	names := make([]string, 0, len(modelNames))

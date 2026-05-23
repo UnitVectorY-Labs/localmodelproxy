@@ -10,9 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/auth"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/config"
@@ -29,9 +29,8 @@ type Options struct {
 	TokenProvider auth.TokenProvider // optional global override
 	Metrics       *Metrics
 	HTTPClient    *http.Client
-	UpstreamBase  string // optional global override
-	Verbose       bool
-	LogOutput     io.Writer
+	UpstreamBase  string    // optional global override
+	LogOutput     io.Writer // optional request/response log destination
 }
 
 // resolvedBackend is an initialised backend ready to handle requests.
@@ -46,8 +45,8 @@ type Proxy struct {
 	cfg             *config.Config
 	backends        []*resolvedBackend
 	metrics         *Metrics
-	verbose         bool
 	logOutput       io.Writer
+	logMu           sync.Mutex
 	thoughtMu       sync.RWMutex
 	thoughtByCallID map[string]string
 }
@@ -57,10 +56,6 @@ type Proxy struct {
 // overrides for all backends (used in tests).
 func New(ctx context.Context, opts Options) (*Proxy, error) {
 	client := opts.HTTPClient
-	logOut := opts.LogOutput
-	if logOut == nil {
-		logOut = os.Stderr
-	}
 
 	backends := make([]*resolvedBackend, 0, len(opts.Config.Backends))
 	for _, bc := range opts.Config.Backends {
@@ -95,8 +90,7 @@ func New(ctx context.Context, opts Options) (*Proxy, error) {
 		cfg:             opts.Config,
 		backends:        backends,
 		metrics:         opts.Metrics,
-		verbose:         opts.Verbose,
-		logOutput:       logOut,
+		logOutput:       opts.LogOutput,
 		thoughtByCallID: make(map[string]string),
 	}, nil
 }
@@ -171,6 +165,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write(errResp)
+			if p.shouldLog() {
+				p.logPayloadBlock(
+					fmt.Sprintf("request_failed method=%s path=%s status=%d error=%q", r.Method, r.URL.Path, record.StatusCode, record.Error),
+					bodyBytes,
+				)
+			}
 			return
 		}
 		backend := p.backendForModel(model)
@@ -191,6 +191,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write(errResp)
+			if p.shouldLog() {
+				p.logPayloadBlock(
+					fmt.Sprintf("request_failed method=%s path=%s model=%q status=%d error=%q", r.Method, r.URL.Path, record.Model, record.StatusCode, record.Error),
+					bodyBytes,
+				)
+			}
 			return
 		}
 		if err := p.forward(w, r, record, backend); err != nil {
@@ -224,25 +230,44 @@ func (p *Proxy) backendForModel(model string) *resolvedBackend {
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestRecord, backend *resolvedBackend) error {
-	token, err := backend.tokens.Token(r.Context())
-	if err != nil {
-		record.StatusCode = http.StatusUnauthorized
-		return err
-	}
-
-	if p.verbose {
-		defer func() {
-			fmt.Fprintf(p.logOutput, "request method=%s path=%s model=%q status=%d backend=%s token=%s\n",
-				r.Method, r.URL.Path, record.Model, record.StatusCode, backend.cfg.Name, maskToken(token))
-		}()
-	}
-
 	body, localModel, contentLength, err := p.prepareRequestBody(r, backend)
 	if err != nil {
 		record.StatusCode = http.StatusBadRequest
 		return err
 	}
 	record.Model = localModel
+	var captured []byte
+	if p.shouldLog() {
+		if readBody, err := io.ReadAll(body); err == nil {
+			captured = readBody
+			body = io.NopCloser(bytes.NewReader(captured))
+		} else {
+			p.writeLog("request method=%s path=%s model=%q backend=%s payload_error=%q\n",
+				r.Method, r.URL.Path, record.Model, backend.cfg.Name, err.Error())
+		}
+	}
+
+	token, err := backend.tokens.Token(r.Context())
+	if err != nil {
+		record.StatusCode = http.StatusUnauthorized
+		if p.shouldLog() {
+			p.logPayloadBlock(
+				fmt.Sprintf("request_failed method=%s path=%s model=%q backend=%s status=%d error=%q", r.Method, r.URL.Path, record.Model, backend.cfg.Name, record.StatusCode, err.Error()),
+				captured,
+			)
+		}
+		return err
+	}
+	if p.shouldLog() {
+		p.logPayloadBlock(
+			fmt.Sprintf("request method=%s path=%s model=%q backend=%s token=%s", r.Method, r.URL.Path, record.Model, backend.cfg.Name, token),
+			captured,
+		)
+		defer func() {
+			p.writeLog("request_done method=%s path=%s model=%q status=%d backend=%s\n",
+				r.Method, r.URL.Path, record.Model, record.StatusCode, backend.cfg.Name)
+		}()
+	}
 
 	upstreamURL, err := buildUpstreamURL(backend.base, r.URL)
 	if err != nil {
@@ -280,12 +305,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 	if resp.StatusCode == http.StatusOK && record.Model != "" {
 		contentType := resp.Header.Get("Content-Type")
 		if strings.Contains(contentType, "text/event-stream") {
-			_, copyErr = streamCopySSEWithModelRewrite(w, resp.Body, responseCapture, record.Model, p.rememberThoughtSignaturesFromJSON)
+			_, copyErr = streamCopySSEWithModelRewrite(w, resp.Body, responseCapture, record.Model, p.rememberThoughtSignaturesFromJSON, p.responseLogger(record, backend, true))
 		} else {
-			_, copyErr = streamCopyJSONWithModelRewrite(w, resp.Body, responseCapture, record.Model, p.rememberThoughtSignaturesFromJSON)
+			_, copyErr = streamCopyJSONWithModelRewrite(w, resp.Body, responseCapture, record.Model, p.rememberThoughtSignaturesFromJSON, p.responseLogger(record, backend, false))
 		}
 	} else {
-		_, copyErr = streamCopy(w, resp.Body, responseCapture)
+		_, copyErr = streamCopy(w, resp.Body, responseCapture, p.responseLogger(record, backend, false))
 	}
 	if parsedUsage, model, ok := parseUsage(resp.Header, responseCapture.Bytes()); ok {
 		record.Usage = parsedUsage
@@ -303,6 +328,37 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, record *RequestR
 		return nil // response headers already written; cannot write an error response
 	}
 	return nil
+}
+
+func (p *Proxy) responseLogger(record *RequestRecord, backend *resolvedBackend, sse bool) func([]byte) {
+	if !p.shouldLog() {
+		return nil
+	}
+	return func(payload []byte) {
+		event := "response"
+		if sse {
+			event = "response_stream"
+		}
+		p.logPayloadBlock(
+			fmt.Sprintf("%s model=%q backend=%s status=%d", event, record.Model, backend.cfg.Name, record.StatusCode),
+			payload,
+		)
+	}
+}
+
+func (p *Proxy) logPayloadBlock(header string, payload []byte) {
+	p.writeLog("%s\npayload:\n%s\n\n", header, formatPayload(payload))
+}
+
+func (p *Proxy) shouldLog() bool {
+	return p.logOutput != nil
+}
+
+func (p *Proxy) writeLog(format string, args ...any) {
+	line := time.Now().Format(time.RFC3339Nano) + " " + fmt.Sprintf(format, args...)
+	p.logMu.Lock()
+	defer p.logMu.Unlock()
+	fmt.Fprint(p.logOutput, line)
 }
 
 func (p *Proxy) prepareRequestBody(r *http.Request, backend *resolvedBackend) (io.ReadCloser, string, int64, error) {
@@ -446,14 +502,18 @@ func setThoughtSignature(toolCall map[string]any, signature string) {
 	google["thought_signature"] = signature
 }
 
-func maskToken(token string) string {
-	if token == "" {
-		return ""
+func formatPayload(payload []byte) string {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return "<empty>"
 	}
-	if len(token) > 8 {
-		return token[:4] + "..." + token[len(token)-4:]
+	var indented bytes.Buffer
+	if json.Indent(&indented, trimmed, "", "  ") == nil {
+		return indented.String()
 	}
-	return "****"
+	text := strings.ReplaceAll(string(trimmed), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", `\r`)
+	return text
 }
 
 func readLimited(r io.Reader, limit int) ([]byte, error) {
@@ -569,7 +629,7 @@ func rewriteJSONModel(body []byte, localModel string) []byte {
 
 // streamCopyJSONWithModelRewrite reads the full JSON body, rewrites the "model"
 // field to localModel, and writes the result to w.
-func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string, observeJSON func([]byte)) (int64, error) {
+func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string, observeJSON func([]byte), logPayload func([]byte)) (int64, error) {
 	body, err := io.ReadAll(src)
 	if err != nil {
 		return 0, err
@@ -577,6 +637,9 @@ func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, captur
 	body = rewriteJSONModel(body, localModel)
 	if observeJSON != nil {
 		observeJSON(body)
+	}
+	if logPayload != nil {
+		logPayload(body)
 	}
 	_, _ = capture.Write(body)
 	n, writeErr := w.Write(body)
@@ -588,7 +651,7 @@ func streamCopyJSONWithModelRewrite(w http.ResponseWriter, src io.Reader, captur
 
 // streamCopySSEWithModelRewrite processes an SSE stream line by line, rewriting
 // the "model" field in each data payload to localModel before forwarding.
-func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string, observeJSON func([]byte)) (int64, error) {
+func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, localModel string, observeJSON func([]byte), logPayload func([]byte)) (int64, error) {
 	scanner := bufio.NewScanner(src)
 	var written int64
 	for scanner.Scan() {
@@ -599,6 +662,9 @@ func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture
 				rewritten := rewriteJSONModel([]byte(data), localModel)
 				if observeJSON != nil {
 					observeJSON(rewritten)
+				}
+				if logPayload != nil {
+					logPayload(rewritten)
 				}
 				line = "data: " + string(rewritten)
 			}
@@ -617,7 +683,7 @@ func streamCopySSEWithModelRewrite(w http.ResponseWriter, src io.Reader, capture
 	return written, scanner.Err()
 }
 
-func streamCopy(w http.ResponseWriter, src io.Reader, capture *limitedBuffer) (int64, error) {
+func streamCopy(w http.ResponseWriter, src io.Reader, capture *limitedBuffer, logPayload func([]byte)) (int64, error) {
 	buf := make([]byte, 32*1024)
 	var written int64
 	for {
@@ -628,6 +694,9 @@ func streamCopy(w http.ResponseWriter, src io.Reader, capture *limitedBuffer) (i
 				return written, err
 			}
 			_, _ = capture.Write(chunk)
+			if logPayload != nil {
+				logPayload(chunk)
+			}
 			written += int64(nr)
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()

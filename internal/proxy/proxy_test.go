@@ -1,17 +1,21 @@
 package proxy
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/UnitVectorY-Labs/localmodelproxy/internal/auth"
 	"github.com/UnitVectorY-Labs/localmodelproxy/internal/config"
 )
 
@@ -29,7 +33,6 @@ func testConfig(models []config.Model) *config.Config {
 	return &config.Config{
 		Server:   config.ServerConfig{Host: "127.0.0.1", Port: 8080},
 		Backends: backends,
-		UI:       config.UIConfig{Mode: "plain"},
 	}
 }
 
@@ -40,6 +43,12 @@ func mustNew(t *testing.T, opts Options) *Proxy {
 		t.Fatalf("proxy.New returned error: %v", err)
 	}
 	return p
+}
+
+type failingTokenProvider struct{}
+
+func (failingTokenProvider) Token(context.Context) (string, error) {
+	return "", errors.New("token exchange failed")
 }
 
 func TestModelsFromConfig(t *testing.T) {
@@ -312,6 +321,9 @@ func TestRecentRequestsOnlyIncludeModelCallsIncludingFailures(t *testing.T) {
 	if snapshot.TotalRequests != 2 || snapshot.ModelRequests != 1 {
 		t.Fatalf("unexpected request totals: %#v", snapshot)
 	}
+	if _, ok := snapshot.Models["unknown"]; ok {
+		t.Fatalf("unknown failed model should not be added to model stats: %#v", snapshot.Models)
+	}
 	if len(snapshot.Recent) != 1 {
 		t.Fatalf("expected one recent model request, got %#v", snapshot.Recent)
 	}
@@ -535,6 +547,109 @@ func TestStreamingFlushesAndAggregatesUsage(t *testing.T) {
 	snapshot := metrics.Snapshot()
 	if snapshot.TotalTokens != 5 {
 		t.Fatalf("usage was not aggregated: %#v", snapshot)
+	}
+}
+
+func TestFileLogRecordsRequestAndStreamingPayloads(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"model\":\"google/gemini\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	handler := mustNew(t, Options{
+		Config:        testConfig([]config.Model{{ID: "google/gemini"}}),
+		TokenProvider: StaticTokenProvider("very-secret-token"),
+		Metrics:       NewMetrics(),
+		UpstreamBase:  upstream.URL,
+		LogOutput:     &logs,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"google/gemini","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	got := logs.String()
+	assertLogTimestamps(t, got)
+	for _, want := range []string{
+		`request method=POST path=/v1/chat/completions model="google/gemini" backend=test token=very-secret-token`,
+		"payload:\n{\n  \"model\": \"google/gemini\",\n  \"stream\": true\n}",
+		`response_stream model="google/gemini" backend=test status=200`,
+		`"content": "hi"`,
+		`"prompt_tokens": 2`,
+		`request_done method=POST path=/v1/chat/completions model="google/gemini" status=200 backend=test`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("file logs missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFileLogRecordsPreForwardFailures(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        *config.Config
+		tokenProvider auth.TokenProvider
+		body          string
+		wantStatus    int
+		wantLog       string
+	}{
+		{
+			name:          "unknown model",
+			config:        testConfig([]config.Model{{ID: "google/gemini"}}),
+			tokenProvider: StaticTokenProvider("token"),
+			body:          `{"model":"unknown-model"}`,
+			wantStatus:    http.StatusBadRequest,
+			wantLog:       "request_failed method=POST path=/v1/chat/completions model=\"unknown-model\" status=400 error=\"model not found\"\npayload:\n{\n  \"model\": \"unknown-model\"\n}",
+		},
+		{
+			name:          "token failure",
+			config:        testConfig([]config.Model{{ID: "google/gemini"}}),
+			tokenProvider: failingTokenProvider{},
+			body:          `{"model":"google/gemini"}`,
+			wantStatus:    http.StatusUnauthorized,
+			wantLog:       "request_failed method=POST path=/v1/chat/completions model=\"google/gemini\" backend=test status=401 error=\"token exchange failed\"\npayload:\n{\n  \"model\": \"google/gemini\"\n}",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			handler := mustNew(t, Options{
+				Config:        tt.config,
+				TokenProvider: tt.tokenProvider,
+				Metrics:       NewMetrics(),
+				UpstreamBase:  "http://unused",
+				LogOutput:     &logs,
+			})
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("unexpected status: got %d want %d body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Fatalf("file logs missing %q in:\n%s", tt.wantLog, logs.String())
+			}
+			assertLogTimestamps(t, logs.String())
+		})
+	}
+}
+
+func assertLogTimestamps(t *testing.T, logs string) {
+	t.Helper()
+	timestamp := regexp.MustCompile(`(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}) `)
+	if !timestamp.MatchString(logs) {
+		t.Fatalf("logs missing RFC3339 timestamp prefix:\n%s", logs)
 	}
 }
 

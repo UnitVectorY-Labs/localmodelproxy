@@ -110,7 +110,7 @@ func (m *Metrics) Finish(record *RequestRecord) {
 	m.cachedTokens += record.Usage.CachedTokens
 	m.totalTokens += record.Usage.TotalTokens
 	m.totalCostUSD += record.CostUSD
-	if record.Model != "" {
+	if shouldAggregateModelStats(record) {
 		stats := m.models[record.Model]
 		stats.Requests++
 		stats.InputTokens += record.Usage.InputTokens
@@ -166,6 +166,10 @@ func (m *Metrics) Snapshot() Snapshot {
 
 func isModelRequest(record *RequestRecord) bool {
 	return record.Path == "/v1/chat/completions" && record.Model != ""
+}
+
+func shouldAggregateModelStats(record *RequestRecord) bool {
+	return isModelRequest(record) && record.StatusCode >= 200 && record.StatusCode < 400 && record.Error == ""
 }
 
 func (s Snapshot) SortedModelNames() []string {
