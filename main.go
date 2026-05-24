@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
+	"runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 )
 
 var Version = "dev"
+var semverRe = regexp.MustCompile(`^\d+\.\d+\.\d+`)
 
 const (
 	exitUsage = 2
@@ -54,12 +58,20 @@ func run() error {
 	flag.Parse()
 
 	if showVersion {
-		fmt.Fprintf(os.Stderr, "localmodelproxy version %s\n", Version)
+		fmt.Fprintf(os.Stderr, "localmodelproxy version %s\n", buildVersionOutput(Version))
 		return nil
 	}
 	if showHelp {
 		printHelp()
 		return nil
+	}
+
+	func buildVersionOutput(version string) string {
+		normalized := version
+		if semverRe.MatchString(normalized) && !strings.HasPrefix(normalized, "v") {
+			normalized = "v" + normalized
+		}
+		return fmt.Sprintf("%s (%s, %s/%s)", normalized, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	}
 
 	cfg, err := config.Load(flags)
