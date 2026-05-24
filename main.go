@@ -66,14 +66,6 @@ func run() error {
 		return nil
 	}
 
-	func buildVersionOutput(version string) string {
-		normalized := version
-		if semverRe.MatchString(normalized) && !strings.HasPrefix(normalized, "v") {
-			normalized = "v" + normalized
-		}
-		return fmt.Sprintf("%s (%s, %s/%s)", normalized, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	}
-
 	cfg, err := config.Load(flags)
 	if err != nil {
 		return err
@@ -133,6 +125,14 @@ func run() error {
 
 	renderer.FinalSummary()
 	return nil
+}
+
+func buildVersionOutput(version string) string {
+	normalized := version
+	if semverRe.MatchString(normalized) && !strings.HasPrefix(normalized, "v") {
+		normalized = "v" + normalized
+	}
+	return fmt.Sprintf("%s (%s, %s/%s)", normalized, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func shutdownServer(server *http.Server, done <-chan error) error {
