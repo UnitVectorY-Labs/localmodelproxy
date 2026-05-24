@@ -24,7 +24,7 @@ func TestBuildVersionOutput(t *testing.T) {
 			prefix: "v1.2.3 ",
 		},
 		{
-			name:   "keeps non semver",
+			name:   "keeps non-semver",
 			input:  "dev",
 			prefix: "dev ",
 		},
