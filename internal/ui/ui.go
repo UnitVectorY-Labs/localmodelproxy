@@ -59,11 +59,14 @@ func (r *Renderer) Stop() {
 	if r.input != nil {
 		r.input()
 	}
+	if r.program != nil {
+		// Send quit first so Bubble Tea can cleanly restore the terminal
+		// (alt screen, cursor, raw mode) before we cancel the context.
+		r.program.Quit()
+		r.program.Wait()
+	}
 	if r.cancel != nil {
 		r.cancel()
-	}
-	if r.program != nil {
-		r.program.Quit()
 	}
 }
 
@@ -169,12 +172,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.shutdown()
 			}
 			return m, tea.Quit
-		case "tab":
+		case "tab", "right", "l":
 			if m.cfg.UI.TestEnabled() {
 				m.activeTab = (m.activeTab + 1) % 2
 			}
 			return m, nil
-		case "shift+tab":
+		case "shift+tab", "left", "h":
 			if m.cfg.UI.TestEnabled() {
 				m.activeTab = (m.activeTab - 1 + 2) % 2
 			}
@@ -278,7 +281,7 @@ func (m tuiModel) View() string {
 
 	b.WriteString("\n")
 	if m.cfg.UI.TestEnabled() {
-		b.WriteString(muted.Render("Tab: switch view • "))
+		b.WriteString(muted.Render("←/→: switch view • "))
 	}
 	if m.activeTab == tabTest {
 		b.WriteString(muted.Render("↑/↓: select model • Enter: test • "))
@@ -289,7 +292,7 @@ func (m tuiModel) View() string {
 }
 
 func (m tuiModel) renderTabBar() string {
-	activeStyle := style(m.color, "section")
+	activeStyle := style(m.color, "tab-active")
 	inactiveStyle := style(m.color, "muted")
 
 	tabs := []string{"Stats", "Test"}
@@ -361,16 +364,14 @@ func (m tuiModel) viewTest(tableWidth int) string {
 	}
 
 	for i, model := range m.testModels {
-		cursor := "  "
 		if i == m.testCursor {
-			cursor = "> "
+			selectedStyle := style(m.color, "selected")
+			b.WriteString(selectedStyle.Render("> " + model))
+		} else {
+			mutedStyle := style(m.color, "muted")
+			b.WriteString("  ")
+			b.WriteString(mutedStyle.Render(model))
 		}
-		nameStyle := style(m.color, "value")
-		if i == m.testCursor {
-			nameStyle = style(m.color, "bold")
-		}
-		b.WriteString(cursor)
-		b.WriteString(nameStyle.Render(model))
 		b.WriteByte('\n')
 	}
 
@@ -652,6 +653,10 @@ func style(color bool, name string) lipgloss.Style {
 		return base.Bold(true).Foreground(lipgloss.Color("208"))
 	case "orange":
 		return base.Foreground(lipgloss.Color("208"))
+	case "tab-active":
+		return base.Bold(true).Foreground(lipgloss.Color("208"))
+	case "selected":
+		return base.Bold(true).Foreground(lipgloss.Color("208"))
 	case "green":
 		return base.Foreground(lipgloss.Color("42"))
 	case "green-bold":
