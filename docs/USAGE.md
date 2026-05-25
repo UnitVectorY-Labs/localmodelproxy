@@ -55,6 +55,10 @@ server:
 
 ui:
   recent_requests: 10
+  test:
+    enabled: true
+    system_message: "You are a helpful assistant."
+    user_message: "Reply with a short test message to confirm this connection is working."
 
 backends:
   - name: backend-name
@@ -79,8 +83,20 @@ backends:
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
 | `ui.recent_requests` | no | `10` | Number of model request rows to show in the TUI recent list. Set to `0` to hide it. Maximum `100`. |
+| `ui.test.enabled` | no | `true` | Enables the Test tab in the TUI for sending test requests to models. Set to `false` to disable. |
+| `ui.test.system_message` | no | `"You are a helpful assistant."` | System message sent with test requests. |
+| `ui.test.user_message` | no | `"Reply with a short test message to confirm this connection is working."` | User message sent with test requests. |
 
 The app uses the TUI when stdout is an interactive terminal. When stdout is not a terminal, it prints plain startup and summary lines.
+
+### TUI Navigation
+
+When the Test tab is enabled (the default), the TUI has two views accessible via the **Tab** key:
+
+- **Stats** – Displays per-model statistics and recent requests (the default view).
+- **Test** – Lists all configured models. Use **↑/↓** to select a model and **Enter** to send a test request. The response is displayed inline.
+
+Test requests go through the proxy like any other request, so they count towards stats and token usage.
 
 ## Backends
 

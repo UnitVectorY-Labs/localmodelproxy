@@ -40,7 +40,7 @@ func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config,
 	case "tui":
 		tuiCtx, cancel := context.WithCancel(ctx)
 		renderer.cancel = cancel
-		model := tuiModel{cfg: cfg, metrics: metrics, shutdown: shutdown, color: colorEnabled()}
+		model := tuiModel{cfg: cfg, metrics: metrics, shutdown: shutdown, color: colorEnabled(), testResults: make(map[string]string)}
 		renderer.program = tea.NewProgram(model, tea.WithOutput(out), tea.WithContext(tuiCtx), tea.WithAltScreen())
 		go func() {
 			_, _ = renderer.program.Run()
@@ -127,12 +127,33 @@ func startPlainLineListener(ctx context.Context, shutdown context.CancelFunc, in
 
 type tickMsg time.Time
 
+// testResultMsg carries the result of a test request back to the TUI.
+type testResultMsg struct {
+	model   string
+	content string
+	err     error
+}
+
+const (
+	tabStats = 0
+	tabTest  = 1
+)
+
 type tuiModel struct {
 	cfg      *config.Config
 	metrics  *proxy.Metrics
 	shutdown context.CancelFunc
 	color    bool
 	width    int
+
+	// Tab navigation
+	activeTab int
+
+	// Test tab state
+	testModels  []string
+	testCursor  int
+	testRunning bool
+	testResults map[string]string // model -> result or error
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -148,10 +169,52 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.shutdown()
 			}
 			return m, tea.Quit
+		case "tab":
+			if m.cfg.UI.TestEnabled() {
+				m.activeTab = (m.activeTab + 1) % 2
+			}
+			return m, nil
+		case "shift+tab":
+			if m.cfg.UI.TestEnabled() {
+				m.activeTab = (m.activeTab + 1) % 2
+			}
+			return m, nil
+		case "up", "k":
+			if m.activeTab == tabTest && len(m.testModels) > 0 {
+				m.testCursor--
+				if m.testCursor < 0 {
+					m.testCursor = len(m.testModels) - 1
+				}
+			}
+			return m, nil
+		case "down", "j":
+			if m.activeTab == tabTest && len(m.testModels) > 0 {
+				m.testCursor++
+				if m.testCursor >= len(m.testModels) {
+					m.testCursor = 0
+				}
+			}
+			return m, nil
+		case "enter":
+			if m.activeTab == tabTest && len(m.testModels) > 0 && !m.testRunning {
+				m.testRunning = true
+				model := m.testModels[m.testCursor]
+				return m, m.runTest(model)
+			}
+			return m, nil
 		default:
 			return m, nil
 		}
+	case testResultMsg:
+		m.testRunning = false
+		if msg.err != nil {
+			m.testResults[msg.model] = "Error: " + msg.err.Error()
+		} else {
+			m.testResults[msg.model] = msg.content
+		}
+		return m, nil
 	case tickMsg:
+		m.testModels = m.buildModelList()
 		return m, tick()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -160,19 +223,91 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m tuiModel) buildModelList() []string {
+	modelNames := make(map[string]struct{})
+	for _, model := range m.cfg.AllModels() {
+		modelNames[model.ID] = struct{}{}
+	}
+	// Also include models seen in metrics
+	snapshot := m.metrics.Snapshot()
+	for name := range snapshot.Models {
+		modelNames[name] = struct{}{}
+	}
+	names := make([]string, 0, len(modelNames))
+	for name := range modelNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (m tuiModel) runTest(model string) tea.Cmd {
+	addr := m.cfg.Address()
+	systemMsg := m.cfg.UI.TestSystemMsg()
+	userMsg := m.cfg.UI.TestUserMsg()
+	return func() tea.Msg {
+		return executeTest(addr, model, systemMsg, userMsg)
+	}
+}
+
 func (m tuiModel) View() string {
-	s := m.metrics.Snapshot()
 	var b strings.Builder
 	tableWidth := m.tableWidth()
-	showCosts := m.cfg.HasModelCosts() || s.TotalCostUSD > 0
-
-	value := style(m.color, "value")
 	muted := style(m.color, "muted")
 
 	b.WriteString(renderLogo(m.color, tableWidth))
 	b.WriteByte('\n')
+
+	value := style(m.color, "value")
 	fmt.Fprintf(&b, "%s %s\n", muted.Render("Endpoint"), value.Render("http://"+m.cfg.Address()+"/v1"))
 	fmt.Fprintf(&b, "%s %s\n\n", muted.Render("Config "), value.Render(configSource(m.cfg)))
+
+	// Tab bar
+	if m.cfg.UI.TestEnabled() {
+		b.WriteString(m.renderTabBar())
+		b.WriteByte('\n')
+		b.WriteByte('\n')
+	}
+
+	switch m.activeTab {
+	case tabStats:
+		b.WriteString(m.viewStats(tableWidth))
+	case tabTest:
+		b.WriteString(m.viewTest(tableWidth))
+	}
+
+	b.WriteString("\n")
+	if m.cfg.UI.TestEnabled() {
+		b.WriteString(muted.Render("Tab: switch view • "))
+	}
+	if m.activeTab == tabTest {
+		b.WriteString(muted.Render("↑/↓: select model • Enter: test • "))
+	}
+	b.WriteString(muted.Render("Ctrl-C or q to stop"))
+	b.WriteByte('\n')
+	return b.String()
+}
+
+func (m tuiModel) renderTabBar() string {
+	activeStyle := style(m.color, "section")
+	inactiveStyle := style(m.color, "muted")
+
+	tabs := []string{"Stats", "Test"}
+	parts := make([]string, len(tabs))
+	for i, name := range tabs {
+		if i == m.activeTab {
+			parts[i] = activeStyle.Render("[" + name + "]")
+		} else {
+			parts[i] = inactiveStyle.Render(" " + name + " ")
+		}
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (m tuiModel) viewStats(tableWidth int) string {
+	s := m.metrics.Snapshot()
+	var b strings.Builder
+	showCosts := m.cfg.HasModelCosts() || s.TotalCostUSD > 0
 
 	b.WriteString(renderTable(m.color,
 		tableWidth,
@@ -209,10 +344,76 @@ func (m tuiModel) View() string {
 			recentRows(s, m.cfg.UI.RecentRequests, showCosts),
 		))
 	}
+	return b.String()
+}
 
-	b.WriteString("\n")
-	b.WriteString(muted.Render("Ctrl-C or q to stop"))
+func (m tuiModel) viewTest(tableWidth int) string {
+	var b strings.Builder
+	muted := style(m.color, "muted")
+
+	b.WriteString(sectionTitle(m.color, "Test Models"))
 	b.WriteByte('\n')
+
+	if len(m.testModels) == 0 {
+		b.WriteString(muted.Render("No models configured"))
+		b.WriteByte('\n')
+		return b.String()
+	}
+
+	for i, model := range m.testModels {
+		cursor := "  "
+		if i == m.testCursor {
+			cursor = "> "
+		}
+		nameStyle := style(m.color, "value")
+		if i == m.testCursor {
+			nameStyle = style(m.color, "bold")
+		}
+		b.WriteString(cursor)
+		b.WriteString(nameStyle.Render(model))
+		b.WriteByte('\n')
+	}
+
+	b.WriteByte('\n')
+	if m.testRunning {
+		b.WriteString(style(m.color, "orange").Render("⏳ Sending test request..."))
+		b.WriteByte('\n')
+	}
+
+	// Show result for the currently selected model
+	if len(m.testModels) > 0 && m.testCursor < len(m.testModels) {
+		selectedModel := m.testModels[m.testCursor]
+		if result, ok := m.testResults[selectedModel]; ok {
+			b.WriteByte('\n')
+			b.WriteString(sectionTitle(m.color, "Response from "+selectedModel))
+			b.WriteByte('\n')
+			// Wrap long results
+			wrapped := wrapText(result, tableWidth)
+			if strings.HasPrefix(result, "Error:") {
+				b.WriteString(style(m.color, "red").Render(wrapped))
+			} else {
+				b.WriteString(style(m.color, "ok").Render(wrapped))
+			}
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func wrapText(text string, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	if len(text) <= width {
+		return text
+	}
+	var b strings.Builder
+	for len(text) > width {
+		b.WriteString(text[:width])
+		b.WriteByte('\n')
+		text = text[width:]
+	}
+	b.WriteString(text)
 	return b.String()
 }
 
