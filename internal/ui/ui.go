@@ -202,6 +202,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activeTab == tabTest && len(m.testModels) > 0 && !m.testRunning {
 				m.testRunning = true
 				model := m.testModels[m.testCursor]
+				delete(m.testResults, model)
 				return m, m.runTest(model)
 			}
 			return m, nil
@@ -381,6 +382,39 @@ func (m tuiModel) viewTest(tableWidth int) string {
 		b.WriteByte('\n')
 	}
 
+	// Show stats for the selected model
+	if len(m.testModels) > 0 && m.testCursor < len(m.testModels) {
+		selectedModel := m.testModels[m.testCursor]
+		s := m.metrics.Snapshot()
+		if modelStats, ok := s.Models[selectedModel]; ok {
+			muted := style(m.color, "muted")
+			value := style(m.color, "value")
+			showCosts := m.cfg.HasModelCosts() || s.TotalCostUSD > 0
+
+			avgLatency := m.avgLatencyForModel(selectedModel, s)
+
+			renderStat := func(label, v string) {
+				b.WriteString(muted.Render(label + ": "))
+				b.WriteString(value.Render(v))
+				b.WriteByte('\n')
+			}
+			renderStat("Requests", fmt.Sprintf("%d", modelStats.Requests))
+			renderStat("Latency", avgLatency)
+			renderStat("Input", formatInt(modelStats.InputTokens))
+			renderStat("Output", formatInt(modelStats.OutputTokens))
+			renderStat("Total", formatInt(modelStats.TotalTokens))
+			if modelStats.CachedTokens > 0 {
+				renderStat("Cached", formatInt(modelStats.CachedTokens))
+			}
+			if modelStats.ThinkingTokens > 0 {
+				renderStat("Think", formatInt(modelStats.ThinkingTokens))
+			}
+			if showCosts && modelStats.CostUSD > 0 {
+				renderStat("Cost", formatCost(modelStats.CostUSD))
+			}
+		}
+	}
+
 	// Show result for the currently selected model
 	if len(m.testModels) > 0 && m.testCursor < len(m.testModels) {
 		selectedModel := m.testModels[m.testCursor]
@@ -399,6 +433,22 @@ func (m tuiModel) viewTest(tableWidth int) string {
 		}
 	}
 	return b.String()
+}
+
+func (m tuiModel) avgLatencyForModel(model string, s proxy.Snapshot) string {
+	var total time.Duration
+	var count int64
+	for _, rec := range s.Recent {
+		if rec.Model == model {
+			total += rec.Duration
+			count++
+		}
+	}
+	if count == 0 {
+		return "-"
+	}
+	avg := total / time.Duration(count)
+	return avg.Round(time.Millisecond).String()
 }
 
 func wrapText(text string, width int) string {
