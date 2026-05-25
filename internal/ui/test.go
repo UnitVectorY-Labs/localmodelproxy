@@ -36,7 +36,7 @@ func executeTest(addr, model, systemMsg, userMsg string) testResultMsg {
 		return testResultMsg{model: model, err: fmt.Errorf("read response: %w", err)}
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return testResultMsg{model: model, err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateString(string(respBody), 200))}
 	}
 

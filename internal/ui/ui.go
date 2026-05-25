@@ -176,7 +176,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "shift+tab":
 			if m.cfg.UI.TestEnabled() {
-				m.activeTab = (m.activeTab + 1) % 2
+				m.activeTab = (m.activeTab - 1 + 2) % 2
 			}
 			return m, nil
 		case "up", "k":
