@@ -40,7 +40,7 @@ func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config,
 	case "tui":
 		tuiCtx, cancel := context.WithCancel(ctx)
 		renderer.cancel = cancel
-		model := tuiModel{cfg: cfg, metrics: metrics, shutdown: shutdown, color: colorEnabled()}
+		model := tuiModel{cfg: cfg, metrics: metrics, shutdown: shutdown, color: colorEnabled(), testResults: make(map[string]string), allModels: []string{"Total"}}
 		renderer.program = tea.NewProgram(model, tea.WithOutput(out), tea.WithContext(tuiCtx), tea.WithAltScreen())
 		go func() {
 			_, _ = renderer.program.Run()
@@ -59,11 +59,14 @@ func (r *Renderer) Stop() {
 	if r.input != nil {
 		r.input()
 	}
+	if r.program != nil {
+		// Send quit first so Bubble Tea can cleanly restore the terminal
+		// (alt screen, cursor, raw mode) before we cancel the context.
+		r.program.Quit()
+		r.program.Wait()
+	}
 	if r.cancel != nil {
 		r.cancel()
-	}
-	if r.program != nil {
-		r.program.Quit()
 	}
 }
 
@@ -127,12 +130,36 @@ func startPlainLineListener(ctx context.Context, shutdown context.CancelFunc, in
 
 type tickMsg time.Time
 
+// testResultMsg carries the result of a test request back to the TUI.
+type testResultMsg struct {
+	model   string
+	content string
+	err     error
+}
+
+const (
+	tabStats = 0
+	tabTest  = 1
+)
+
 type tuiModel struct {
 	cfg      *config.Config
 	metrics  *proxy.Metrics
 	shutdown context.CancelFunc
 	color    bool
 	width    int
+	height   int
+
+	// Tab navigation
+	activeTab int
+
+	// Shared model selection (used by both Stats and Test tabs)
+	modelCursor int
+	allModels   []string // ["Total", model1, model2, ...]
+
+	// Test tab state
+	testRunning bool
+	testResults map[string]string // model -> result or error
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -148,51 +175,213 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.shutdown()
 			}
 			return m, tea.Quit
+		case "tab", "right", "l":
+			if m.cfg.UI.TestEnabled() {
+				m.activeTab = (m.activeTab + 1) % 2
+			}
+			return m, nil
+		case "shift+tab", "left", "h":
+			if m.cfg.UI.TestEnabled() {
+				m.activeTab = (m.activeTab - 1 + 2) % 2
+			}
+			return m, nil
+		case "up", "k":
+			if len(m.allModels) > 0 {
+				m.modelCursor--
+				if m.modelCursor < 0 {
+					m.modelCursor = len(m.allModels) - 1
+				}
+			}
+			return m, nil
+		case "down", "j":
+			if len(m.allModels) > 0 {
+				m.modelCursor++
+				if m.modelCursor >= len(m.allModels) {
+					m.modelCursor = 0
+				}
+			}
+			return m, nil
+		case "enter":
+			if m.activeTab == tabTest && len(m.allModels) > 0 && !m.testRunning && m.modelCursor > 0 {
+				m.testRunning = true
+				model := m.allModels[m.modelCursor]
+				delete(m.testResults, model)
+				return m, m.runTest(model)
+			}
+			return m, nil
 		default:
 			return m, nil
 		}
+	case testResultMsg:
+		m.testRunning = false
+		if msg.err != nil {
+			m.testResults[msg.model] = "Error: " + msg.err.Error()
+		} else {
+			m.testResults[msg.model] = msg.content
+		}
+		return m, nil
 	case tickMsg:
+		newAllModels := m.buildStatsModelList()
+		if m.modelCursor >= len(newAllModels) {
+			m.modelCursor = 0
+		}
+		m.allModels = newAllModels
 		return m, tick()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 	}
 	return m, nil
 }
 
+func (m tuiModel) buildStatsModelList() []string {
+	names := m.buildModelList()
+	result := make([]string, 0, len(names)+1)
+	result = append(result, "Total")
+	result = append(result, names...)
+	return result
+}
+
+func (m tuiModel) buildModelList() []string {
+	modelNames := make(map[string]struct{})
+	for _, model := range m.cfg.AllModels() {
+		modelNames[model.ID] = struct{}{}
+	}
+	// Also include models seen in metrics
+	snapshot := m.metrics.Snapshot()
+	for name := range snapshot.Models {
+		modelNames[name] = struct{}{}
+	}
+	names := make([]string, 0, len(modelNames))
+	for name := range modelNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (m tuiModel) runTest(model string) tea.Cmd {
+	addr := m.cfg.Address()
+	systemMsg := m.cfg.UI.TestSystemMsg()
+	userMsg := m.cfg.UI.TestUserMsg()
+	return func() tea.Msg {
+		return executeTest(addr, model, systemMsg, userMsg)
+	}
+}
+
 func (m tuiModel) View() string {
+	tableWidth := m.tableWidth()
+	muted := style(m.color, "muted")
+	value := style(m.color, "value")
+
+	// --- Header ---
+	var header strings.Builder
+	header.WriteString(renderLogo(m.color, tableWidth))
+	header.WriteByte('\n')
+
+	endpoint := "http://" + m.cfg.Address() + "/v1"
+	configSrc := configSource(m.cfg)
+	oneLinerLen := len("Endpoint ") + len(endpoint) + len("  Config ") + len(configSrc)
+	if tableWidth > 0 && oneLinerLen <= tableWidth {
+		fmt.Fprintf(&header, "%s %s  %s %s\n\n",
+			muted.Render("Endpoint"), value.Render(endpoint),
+			muted.Render("Config"), value.Render(configSrc),
+		)
+	} else {
+		fmt.Fprintf(&header, "%s %s\n%s %s\n\n",
+			muted.Render("Endpoint"), value.Render(endpoint),
+			muted.Render("Config "), value.Render(configSrc),
+		)
+	}
+
+	if m.cfg.UI.TestEnabled() {
+		header.WriteString(m.renderTabBar())
+		header.WriteByte('\n')
+		header.WriteByte('\n')
+	}
+
+	// --- Main content ---
+	var content string
+	switch m.activeTab {
+	case tabStats:
+		content = m.viewStats(tableWidth)
+	case tabTest:
+		content = m.viewTest(tableWidth)
+	}
+
+	// --- Footer ---
+	var footer strings.Builder
+	if m.cfg.UI.TestEnabled() {
+		footer.WriteString(muted.Render("←/→: switch view • "))
+	}
+	footer.WriteString(muted.Render("↑/↓: select • "))
+	if m.activeTab == tabTest {
+		footer.WriteString(muted.Render("Enter: test • "))
+	}
+	footer.WriteString(muted.Render("Ctrl-C or q to stop"))
+
+	var b strings.Builder
+	b.WriteString(header.String())
+	b.WriteString(content)
+
+	// Pin footer to bottom of terminal
+	if m.height > 0 {
+		used := strings.Count(header.String(), "\n") + strings.Count(content, "\n") + 2 // +2: blank line + footer
+		if pad := m.height - used; pad > 0 {
+			b.WriteString(strings.Repeat("\n", pad))
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(footer.String())
+	b.WriteByte('\n')
+	return b.String()
+}
+
+func (m tuiModel) renderTabBar() string {
+	activeStyle := style(m.color, "tab-active")
+	inactiveStyle := style(m.color, "tab-inactive")
+
+	tabs := []string{"Stats", "Test"}
+	parts := make([]string, len(tabs))
+	for i, name := range tabs {
+		if i == m.activeTab {
+			parts[i] = activeStyle.Render("[" + name + "]")
+		} else {
+			parts[i] = inactiveStyle.Render("[" + name + "]")
+		}
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (m tuiModel) viewStats(tableWidth int) string {
 	s := m.metrics.Snapshot()
 	var b strings.Builder
-	tableWidth := m.tableWidth()
 	showCosts := m.cfg.HasModelCosts() || s.TotalCostUSD > 0
 
-	value := style(m.color, "value")
-	muted := style(m.color, "muted")
-
-	b.WriteString(renderLogo(m.color, tableWidth))
-	b.WriteByte('\n')
-	fmt.Fprintf(&b, "%s %s\n", muted.Render("Endpoint"), value.Render("http://"+m.cfg.Address()+"/v1"))
-	fmt.Fprintf(&b, "%s %s\n\n", muted.Render("Config "), value.Render(configSource(m.cfg)))
+	// statsCursor==0 means "Total" (all models); cursor>0 means a specific model.
+	var selectedModel string
+	if m.modelCursor < len(m.allModels) {
+		selectedModel = m.allModels[m.modelCursor]
+	}
 
 	b.WriteString(renderTable(m.color,
 		tableWidth,
-		[]column{
-			{name: "Model", width: 36, flex: true},
-			{name: "Req", width: 6, right: true},
-			{name: "Input", width: 10, right: true},
-			{name: "Output", width: 10, right: true},
-			{name: "Think", width: 8, right: true},
-			{name: "Cached", width: 8, right: true},
-			{name: "Total", width: 10, right: true},
-			{name: "Cost", width: 10, right: true, hidden: !showCosts, style: "green"},
-		},
-		modelRows(m.cfg, s, showCosts),
+		modelTableColumns(showCosts),
+		modelRows(m.cfg, s, showCosts, selectedModel),
 	))
 	b.WriteString("\n")
 
 	if m.cfg.UI.RecentRequests > 0 {
 		b.WriteString(sectionTitle(m.color, "Recent Requests"))
 		b.WriteByte('\n')
+
+		// filterModel is empty for Total (show all), or the specific model name
+		filterModel := ""
+		if selectedModel != "Total" {
+			filterModel = selectedModel
+		}
+
 		b.WriteString(renderTable(m.color,
 			tableWidth,
 			[]column{
@@ -206,13 +395,64 @@ func (m tuiModel) View() string {
 				{name: "Total", width: 10, right: true},
 				{name: "Cost", width: 10, right: true, hidden: !showCosts, style: "green"},
 			},
-			recentRows(s, m.cfg.UI.RecentRequests, showCosts),
+			recentRowsFiltered(s, m.cfg.UI.RecentRequests, showCosts, filterModel),
 		))
 	}
+	return b.String()
+}
 
-	b.WriteString("\n")
-	b.WriteString(muted.Render("Ctrl-C or q to stop"))
+func (m tuiModel) viewTest(tableWidth int) string {
+	var b strings.Builder
+	s := m.metrics.Snapshot()
+	showCosts := m.cfg.HasModelCosts() || s.TotalCostUSD > 0
+
+	var selectedTestModel string
+	if m.modelCursor < len(m.allModels) && m.allModels[m.modelCursor] != "Total" {
+		selectedTestModel = m.allModels[m.modelCursor]
+	}
+
+	b.WriteString(renderTable(m.color,
+		tableWidth,
+		testModelTableColumns(showCosts),
+		testModelRows(m.cfg, s, showCosts, m.allModels[m.modelCursor]),
+	))
+
 	b.WriteByte('\n')
+	if m.testRunning {
+		b.WriteString(style(m.color, "orange").Render("⏳ Sending test request..."))
+		b.WriteByte('\n')
+	}
+
+	if selectedTestModel != "" {
+		if result, ok := m.testResults[selectedTestModel]; ok {
+			b.WriteString(sectionTitle(m.color, "Response from "+selectedTestModel))
+			b.WriteByte('\n')
+			wrapped := wrapText(result, tableWidth)
+			if strings.HasPrefix(result, "Error:") {
+				b.WriteString(style(m.color, "red").Render(wrapped))
+			} else {
+				b.WriteString(style(m.color, "ok").Render(wrapped))
+			}
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func wrapText(text string, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	if len(text) <= width {
+		return text
+	}
+	var b strings.Builder
+	for len(text) > width {
+		b.WriteString(text[:width])
+		b.WriteByte('\n')
+		text = text[width:]
+	}
+	b.WriteString(text)
 	return b.String()
 }
 
@@ -357,7 +597,96 @@ func tableLineWidth(columns []column) int {
 	return width
 }
 
-func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool) [][]string {
+func testModelTableColumns(showCosts bool) []column {
+	return []column{
+		{name: " ", width: 1},
+		{name: "Model", width: 36, flex: true},
+		{name: "Latency", width: 10, right: true},
+		{name: "Input", width: 10, right: true},
+		{name: "Output", width: 10, right: true},
+		{name: "Think", width: 8, right: true},
+		{name: "Cached", width: 8, right: true},
+		{name: "Total", width: 10, right: true},
+		{name: "Cost", width: 10, right: true, hidden: !showCosts, style: "green"},
+	}
+}
+
+// testModelRows builds rows for the Test tab: one row per model showing the
+// most recent request's stats for that model (no Total/separator row).
+func testModelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, selectedModel string) [][]string {
+	modelNames := make(map[string]struct{})
+	for _, model := range cfg.AllModels() {
+		modelNames[model.ID] = struct{}{}
+	}
+	names := make([]string, 0, len(modelNames))
+	for name := range modelNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		names = append(names, "")
+	}
+
+	// Index most recent record per model
+	latestPerModel := make(map[string]proxy.RequestRecord)
+	for i := len(snapshot.Recent) - 1; i >= 0; i-- {
+		rec := snapshot.Recent[i]
+		latestPerModel[rec.Model] = rec
+	}
+
+	indicator := func(name string) string {
+		if name == selectedModel {
+			return withStyle("selected", ">")
+		}
+		return " "
+	}
+	modelName := func(name string) string {
+		if name == selectedModel {
+			return withStyle("orange", name)
+		}
+		return name
+	}
+
+	rows := make([][]string, 0, len(names))
+	for _, name := range names {
+		rec, hasRec := latestPerModel[name]
+		latency := "-"
+		if hasRec && rec.Duration > 0 {
+			latency = rec.Duration.Round(time.Millisecond).String()
+			if requestFailed(rec) {
+				latency = withStyle("red", latency)
+			}
+		}
+		rows = append(rows, []string{
+			indicator(name),
+			modelName(name),
+			latency,
+			formatIntDash(rec.Usage.InputTokens),
+			formatIntDash(rec.Usage.OutputTokens),
+			formatIntDash(rec.Usage.ThinkingTokens),
+			formatIntDash(rec.Usage.CachedTokens),
+			formatIntDash(rec.Usage.TotalTokens),
+			formatCostDashIfEnabled(rec.CostUSD, showCosts),
+		})
+	}
+	return rows
+}
+
+func modelTableColumns(showCosts bool) []column {
+	return []column{
+		{name: " ", width: 1},
+		{name: "Model", width: 36, flex: true},
+		{name: "Req", width: 6, right: true},
+		{name: "Input", width: 10, right: true},
+		{name: "Output", width: 10, right: true},
+		{name: "Think", width: 8, right: true},
+		{name: "Cached", width: 8, right: true},
+		{name: "Total", width: 10, right: true},
+		{name: "Cost", width: 10, right: true, hidden: !showCosts, style: "green"},
+	}
+}
+
+func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, selectedModel string) [][]string {
 	modelNames := make(map[string]struct{})
 	for _, model := range cfg.AllModels() {
 		modelNames[model.ID] = struct{}{}
@@ -372,11 +701,33 @@ func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool) [][]
 		names = append(names, "")
 	}
 
+	indicator := func(name string) string {
+		if name == selectedModel {
+			return withStyle("selected", ">")
+		}
+		return " "
+	}
+
+	modelName := func(name string) string {
+		if name == selectedModel {
+			return withStyle("orange", name)
+		}
+		return name
+	}
+
+	totalLabel := func() string {
+		if selectedModel == "Total" {
+			return withStyle("orange", "Total")
+		}
+		return withStyle("bold", "Total")
+	}
+
 	rows := make([][]string, 0, len(names))
 	for _, name := range names {
 		stats := snapshot.Models[name]
 		rows = append(rows, []string{
-			name,
+			indicator(name),
+			modelName(name),
 			formatIntDash(stats.Requests),
 			formatIntDash(stats.InputTokens),
 			formatIntDash(stats.OutputTokens),
@@ -388,7 +739,8 @@ func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool) [][]
 	}
 	rows = append(rows, separatorRow())
 	rows = append(rows, []string{
-		withStyle("bold", "Total"),
+		indicator("Total"),
+		totalLabel(),
 		withStyle("bold", formatIntDash(snapshot.ModelRequests)),
 		withStyle("bold", formatIntDash(snapshot.InputTokens)),
 		withStyle("bold", formatIntDash(snapshot.OutputTokens)),
@@ -401,11 +753,24 @@ func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool) [][]
 }
 
 func recentRows(snapshot proxy.Snapshot, limit int, showCosts bool) [][]string {
+	return recentRowsFiltered(snapshot, limit, showCosts, "")
+}
+
+func recentRowsFiltered(snapshot proxy.Snapshot, limit int, showCosts bool, filterModel string) [][]string {
 	recent := snapshot.Recent
+	if filterModel != "" {
+		filtered := make([]proxy.RequestRecord, 0, len(recent))
+		for _, rec := range recent {
+			if rec.Model == filterModel {
+				filtered = append(filtered, rec)
+			}
+		}
+		recent = filtered
+	}
 	if len(recent) > limit {
 		recent = recent[:limit]
 	}
-	rows := make([][]string, 0, limit)
+	rows := make([][]string, 0, len(recent))
 	for _, rec := range recent {
 		latency := rec.Duration.Round(time.Millisecond).String()
 		if requestFailed(rec) {
@@ -425,9 +790,6 @@ func recentRows(snapshot proxy.Snapshot, limit int, showCosts bool) [][]string {
 			row = append(row, formatCost(rec.CostUSD))
 		}
 		rows = append(rows, row)
-	}
-	for len(rows) < limit {
-		rows = append(rows, []string{})
 	}
 	return rows
 }
@@ -451,6 +813,12 @@ func style(color bool, name string) lipgloss.Style {
 		return base.Bold(true).Foreground(lipgloss.Color("208"))
 	case "orange":
 		return base.Foreground(lipgloss.Color("208"))
+	case "tab-active":
+		return base.Bold(true).Background(lipgloss.Color("208")).Foreground(lipgloss.Color("0"))
+	case "tab-inactive":
+		return base.Foreground(lipgloss.Color("208"))
+	case "selected":
+		return base.Bold(true).Foreground(lipgloss.Color("208"))
 	case "green":
 		return base.Foreground(lipgloss.Color("42"))
 	case "green-bold":

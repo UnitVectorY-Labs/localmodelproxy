@@ -93,7 +93,44 @@ type ModelCost struct {
 }
 
 type UIConfig struct {
-	RecentRequests int `yaml:"recent_requests"`
+	RecentRequests int        `yaml:"recent_requests"`
+	Test           TestConfig `yaml:"test"`
+}
+
+// TestConfig controls the in-TUI model test feature.
+type TestConfig struct {
+	Enabled       *bool  `yaml:"enabled"`
+	SystemMessage string `yaml:"system_message"`
+	UserMessage   string `yaml:"user_message"`
+}
+
+const (
+	DefaultTestSystemMessage = "You are a helpful assistant."
+	DefaultTestUserMessage   = "Reply with a short test message to confirm this connection is working."
+)
+
+// TestEnabled returns whether the TUI test tab is enabled (default true).
+func (c *UIConfig) TestEnabled() bool {
+	if c.Test.Enabled == nil {
+		return true
+	}
+	return *c.Test.Enabled
+}
+
+// TestSystemMsg returns the system message for testing, using the default if not configured.
+func (c *UIConfig) TestSystemMsg() string {
+	if c.Test.SystemMessage != "" {
+		return c.Test.SystemMessage
+	}
+	return DefaultTestSystemMessage
+}
+
+// TestUserMsg returns the user message for testing, using the default if not configured.
+func (c *UIConfig) TestUserMsg() string {
+	if c.Test.UserMessage != "" {
+		return c.Test.UserMessage
+	}
+	return DefaultTestUserMessage
 }
 
 func Load(flags Flags) (*Config, error) {

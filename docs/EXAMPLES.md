@@ -231,3 +231,24 @@ Routing behavior:
 - `gemini-3.1-flash-lite-preview` routes to `cloud`
 - `hosted-small` and `hosted-large` route to `hosted`
 - any other model routes to `local` because it uses `models: all`
+
+## Disabling the Test Tab
+
+The TUI Test tab is enabled by default. To disable it:
+
+```yaml
+ui:
+  test:
+    enabled: false
+```
+
+## Custom Test Messages
+
+Override the default test messages used by the Test tab:
+
+```yaml
+ui:
+  test:
+    system_message: "You are a diagnostics assistant."
+    user_message: "Respond with OK if you can read this."
+```
