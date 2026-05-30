@@ -337,7 +337,7 @@ func TestRecentRequestsOnlyIncludeModelCallsIncludingFailures(t *testing.T) {
 
 func TestRecentRequestSequenceIsMonotonic(t *testing.T) {
 	metrics := NewMetrics()
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		record := metrics.Begin(http.MethodPost, "/v1/chat/completions")
 		record.Model = "model"
 		record.StatusCode = http.StatusOK
