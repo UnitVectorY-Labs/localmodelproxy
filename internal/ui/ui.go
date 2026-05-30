@@ -41,7 +41,7 @@ func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config,
 		tuiCtx, cancel := context.WithCancel(ctx)
 		renderer.cancel = cancel
 		model := tuiModel{cfg: cfg, metrics: metrics, shutdown: shutdown, color: colorEnabled(), testResults: make(map[string]string), allModels: []string{"Total"}}
-		renderer.program = tea.NewProgram(model, tea.WithOutput(out), tea.WithContext(tuiCtx), tea.WithAltScreen())
+		renderer.program = tea.NewProgram(model, tea.WithOutput(out), tea.WithContext(tuiCtx), tea.WithAltScreen(), tea.WithMouseAllMotion())
 		go func() {
 			_, _ = renderer.program.Run()
 		}()
@@ -142,6 +142,20 @@ const (
 	tabTest  = 1
 )
 
+const (
+	hoverNone = iota
+	hoverTab
+	hoverModel
+)
+
+const screenTopPadding = 1
+
+type hoverTarget struct {
+	kind  int
+	tab   int
+	model string
+}
+
 type tuiModel struct {
 	cfg      *config.Config
 	metrics  *proxy.Metrics
@@ -156,6 +170,7 @@ type tuiModel struct {
 	// Shared model selection (used by both Stats and Test tabs)
 	modelCursor int
 	allModels   []string // ["Total", model1, model2, ...]
+	hover       hoverTarget
 
 	// Test tab state
 	testRunning bool
@@ -202,16 +217,36 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
-			if m.activeTab == tabTest && len(m.allModels) > 0 && !m.testRunning && m.modelCursor > 0 {
-				m.testRunning = true
-				model := m.allModels[m.modelCursor]
-				delete(m.testResults, model)
-				return m, m.runTest(model)
+			if m.activeTab == tabTest {
+				if cmd := m.startSelectedTest(); cmd != nil {
+					return m, cmd
+				}
 			}
 			return m, nil
 		default:
 			return m, nil
 		}
+	case tea.MouseMsg:
+		target := m.hitTarget(int(msg.X), int(msg.Y))
+		m.hover = target
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			switch target.kind {
+			case hoverTab:
+				if m.cfg.UI.TestEnabled() {
+					m.activeTab = target.tab
+				}
+			case hoverModel:
+				if idx := m.modelIndex(target.model); idx >= 0 {
+					m.modelCursor = idx
+					if m.activeTab == tabTest {
+						if cmd := m.startSelectedTest(); cmd != nil {
+							return m, cmd
+						}
+					}
+				}
+			}
+		}
+		return m, nil
 	case testResultMsg:
 		m.testRunning = false
 		if msg.err != nil {
@@ -259,6 +294,25 @@ func (m tuiModel) buildModelList() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (m tuiModel) modelIndex(model string) int {
+	for i, name := range m.allModels {
+		if name == model {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *tuiModel) startSelectedTest() tea.Cmd {
+	if len(m.allModels) == 0 || m.testRunning || m.modelCursor <= 0 {
+		return nil
+	}
+	m.testRunning = true
+	model := m.allModels[m.modelCursor]
+	delete(m.testResults, model)
+	return m.runTest(model)
 }
 
 func (m tuiModel) runTest(model string) tea.Cmd {
@@ -322,12 +376,13 @@ func (m tuiModel) View() string {
 	footer.WriteString(muted.Render("Ctrl-C or q to stop"))
 
 	var b strings.Builder
+	b.WriteString(strings.Repeat("\n", screenTopPadding))
 	b.WriteString(header.String())
 	b.WriteString(content)
 
 	// Pin footer to bottom of terminal
 	if m.height > 0 {
-		used := strings.Count(header.String(), "\n") + strings.Count(content, "\n") + 2 // +2: blank line + footer
+		used := screenTopPadding + strings.Count(header.String(), "\n") + strings.Count(content, "\n") + 2 // +2: blank line + footer
 		if pad := m.height - used; pad > 0 {
 			b.WriteString(strings.Repeat("\n", pad))
 		}
@@ -345,8 +400,13 @@ func (m tuiModel) renderTabBar() string {
 	tabs := []string{"Stats", "Test"}
 	parts := make([]string, len(tabs))
 	for i, name := range tabs {
-		if i == m.activeTab {
+		hovered := m.hover.kind == hoverTab && m.hover.tab == i
+		if i == m.activeTab && hovered {
+			parts[i] = style(m.color, "tab-active-hover").Render("[" + name + "]")
+		} else if i == m.activeTab {
 			parts[i] = activeStyle.Render("[" + name + "]")
+		} else if hovered {
+			parts[i] = style(m.color, "tab-hover").Render("[" + name + "]")
 		} else {
 			parts[i] = inactiveStyle.Render("[" + name + "]")
 		}
@@ -368,7 +428,7 @@ func (m tuiModel) viewStats(tableWidth int) string {
 	b.WriteString(renderTable(m.color,
 		tableWidth,
 		modelTableColumns(showCosts),
-		modelRows(m.cfg, s, showCosts, selectedModel),
+		modelRows(m.cfg, s, showCosts, selectedModel, m.hoveredModel()),
 	))
 	b.WriteString("\n")
 
@@ -414,7 +474,7 @@ func (m tuiModel) viewTest(tableWidth int) string {
 	b.WriteString(renderTable(m.color,
 		tableWidth,
 		testModelTableColumns(showCosts),
-		testModelRows(m.cfg, s, showCosts, m.allModels[m.modelCursor]),
+		testModelRows(m.cfg, s, showCosts, m.allModels[m.modelCursor], m.hoveredModel()),
 	))
 
 	b.WriteByte('\n')
@@ -434,6 +494,132 @@ func (m tuiModel) viewTest(tableWidth int) string {
 				b.WriteString(style(m.color, "ok").Render(wrapped))
 			}
 			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func (m tuiModel) hoveredModel() string {
+	if m.hover.kind != hoverModel {
+		return ""
+	}
+	return m.hover.model
+}
+
+func (m tuiModel) hitTarget(x, y int) hoverTarget {
+	if x < 0 || y < 0 {
+		return hoverTarget{}
+	}
+	y += screenTopPadding
+	lines := m.hitTestLines()
+	if y >= len(lines) {
+		return hoverTarget{}
+	}
+	line := lines[y]
+	if m.cfg.UI.TestEnabled() {
+		if statsX := strings.Index(line, "[Stats]"); statsX >= 0 {
+			if x >= statsX && x < statsX+len("[Stats]") {
+				return hoverTarget{kind: hoverTab, tab: tabStats}
+			}
+		}
+		if testX := strings.Index(line, "[Test]"); testX >= 0 {
+			if x >= testX && x < testX+len("[Test]") {
+				return hoverTarget{kind: hoverTab, tab: tabTest}
+			}
+		}
+	}
+	return m.modelHitTarget(x, y, lines)
+}
+
+func (m tuiModel) hitTestLines() []string {
+	plain := m
+	plain.color = false
+	plain.hover = hoverTarget{}
+	return strings.Split(stripANSIEscapes(plain.View()), "\n")
+}
+
+func (m tuiModel) modelHitTarget(x, y int, lines []string) hoverTarget {
+	var names []string
+	var includeTotal bool
+	var headerNeedle string
+	switch m.activeTab {
+	case tabStats:
+		names = configuredModelNames(m.cfg)
+		includeTotal = true
+		headerNeedle = "Req"
+	case tabTest:
+		names = configuredModelNames(m.cfg)
+		headerNeedle = "Latency"
+	default:
+		return hoverTarget{}
+	}
+	if len(names) == 0 {
+		names = append(names, "")
+	}
+
+	headerY := -1
+	for i, line := range lines {
+		if strings.Contains(line, "Model") && strings.Contains(line, headerNeedle) {
+			headerY = i
+			break
+		}
+	}
+	if headerY < 0 {
+		return hoverTarget{}
+	}
+
+	firstRowY := headerY + 2
+	if y >= firstRowY && y < firstRowY+len(names) {
+		if x >= len(lines[y]) {
+			return hoverTarget{}
+		}
+		name := names[y-firstRowY]
+		if name != "" {
+			return hoverTarget{kind: hoverModel, model: name}
+		}
+	}
+	if includeTotal && y == firstRowY+len(names)+1 {
+		if x >= len(lines[y]) {
+			return hoverTarget{}
+		}
+		return hoverTarget{kind: hoverModel, model: "Total"}
+	}
+	return hoverTarget{}
+}
+
+func stripANSIEscapes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\x1b' {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		if i >= len(s) {
+			break
+		}
+		switch s[i] {
+		case '[':
+			for i+1 < len(s) {
+				i++
+				if s[i] >= '@' && s[i] <= '~' {
+					break
+				}
+			}
+		case ']':
+			for i+1 < len(s) {
+				i++
+				if s[i] == '\a' {
+					break
+				}
+				if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '\\' {
+					i++
+					break
+				}
+			}
+		default:
+			// Skip simple two-byte escape sequences.
 		}
 	}
 	return b.String()
@@ -613,16 +799,8 @@ func testModelTableColumns(showCosts bool) []column {
 
 // testModelRows builds rows for the Test tab: one row per model showing the
 // most recent request's stats for that model (no Total/separator row).
-func testModelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, selectedModel string) [][]string {
-	modelNames := make(map[string]struct{})
-	for _, model := range cfg.AllModels() {
-		modelNames[model.ID] = struct{}{}
-	}
-	names := make([]string, 0, len(modelNames))
-	for name := range modelNames {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+func testModelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, selectedModel, hoveredModel string) [][]string {
+	names := configuredModelNames(cfg)
 	if len(names) == 0 {
 		names = append(names, "")
 	}
@@ -641,8 +819,14 @@ func testModelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, 
 		return " "
 	}
 	modelName := func(name string) string {
+		if name == selectedModel && name == hoveredModel {
+			return withStyle("selected-hover", name)
+		}
 		if name == selectedModel {
 			return withStyle("orange", name)
+		}
+		if name == hoveredModel {
+			return withStyle("hover", name)
 		}
 		return name
 	}
@@ -686,17 +870,8 @@ func modelTableColumns(showCosts bool) []column {
 	}
 }
 
-func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, selectedModel string) [][]string {
-	modelNames := make(map[string]struct{})
-	for _, model := range cfg.AllModels() {
-		modelNames[model.ID] = struct{}{}
-	}
-
-	names := make([]string, 0, len(modelNames))
-	for name := range modelNames {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, selectedModel, hoveredModel string) [][]string {
+	names := configuredModelNames(cfg)
 	if len(names) == 0 {
 		names = append(names, "")
 	}
@@ -709,15 +884,27 @@ func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, sele
 	}
 
 	modelName := func(name string) string {
+		if name == selectedModel && name == hoveredModel {
+			return withStyle("selected-hover", name)
+		}
 		if name == selectedModel {
 			return withStyle("orange", name)
+		}
+		if name == hoveredModel {
+			return withStyle("hover", name)
 		}
 		return name
 	}
 
 	totalLabel := func() string {
+		if selectedModel == "Total" && hoveredModel == "Total" {
+			return withStyle("selected-hover", "Total")
+		}
 		if selectedModel == "Total" {
 			return withStyle("orange", "Total")
+		}
+		if hoveredModel == "Total" {
+			return withStyle("hover", "Total")
 		}
 		return withStyle("bold", "Total")
 	}
@@ -752,6 +939,19 @@ func modelRows(cfg *config.Config, snapshot proxy.Snapshot, showCosts bool, sele
 	return rows
 }
 
+func configuredModelNames(cfg *config.Config) []string {
+	modelNames := make(map[string]struct{})
+	for _, model := range cfg.AllModels() {
+		modelNames[model.ID] = struct{}{}
+	}
+	names := make([]string, 0, len(modelNames))
+	for name := range modelNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func recentRows(snapshot proxy.Snapshot, limit int, showCosts bool) [][]string {
 	return recentRowsFiltered(snapshot, limit, showCosts, "")
 }
@@ -780,14 +980,14 @@ func recentRowsFiltered(snapshot proxy.Snapshot, limit int, showCosts bool, filt
 			formatInt(rec.Sequence),
 			rec.Model,
 			latency,
-			formatInt(rec.Usage.InputTokens),
-			formatInt(rec.Usage.OutputTokens),
-			formatInt(rec.Usage.ThinkingTokens),
-			formatInt(rec.Usage.CachedTokens),
-			formatInt(rec.Usage.TotalTokens),
+			formatIntDash(rec.Usage.InputTokens),
+			formatIntDash(rec.Usage.OutputTokens),
+			formatIntDash(rec.Usage.ThinkingTokens),
+			formatIntDash(rec.Usage.CachedTokens),
+			formatIntDash(rec.Usage.TotalTokens),
 		}
 		if showCosts {
-			row = append(row, formatCost(rec.CostUSD))
+			row = append(row, formatCostDashIfEnabled(rec.CostUSD, showCosts))
 		}
 		rows = append(rows, row)
 	}
@@ -804,6 +1004,8 @@ func style(color bool, name string) lipgloss.Style {
 		switch name {
 		case "bold", "green-bold", "logo", "title", "section", "header":
 			return base.Bold(true)
+		case "hover", "selected-hover", "tab-hover", "tab-active-hover":
+			return base.Bold(true).Reverse(true)
 		default:
 			return base
 		}
@@ -815,10 +1017,18 @@ func style(color bool, name string) lipgloss.Style {
 		return base.Foreground(lipgloss.Color("208"))
 	case "tab-active":
 		return base.Bold(true).Background(lipgloss.Color("208")).Foreground(lipgloss.Color("0"))
+	case "tab-active-hover":
+		return base.Bold(true).Background(lipgloss.Color("229")).Foreground(lipgloss.Color("0"))
 	case "tab-inactive":
 		return base.Foreground(lipgloss.Color("208"))
+	case "tab-hover":
+		return base.Bold(true).Background(lipgloss.Color("236")).Foreground(lipgloss.Color("229"))
 	case "selected":
 		return base.Bold(true).Foreground(lipgloss.Color("208"))
+	case "selected-hover":
+		return base.Bold(true).Background(lipgloss.Color("236")).Foreground(lipgloss.Color("229"))
+	case "hover":
+		return base.Background(lipgloss.Color("236")).Foreground(lipgloss.Color("229"))
 	case "green":
 		return base.Foreground(lipgloss.Color("42"))
 	case "green-bold":
@@ -835,6 +1045,8 @@ func style(color bool, name string) lipgloss.Style {
 		return base.Bold(true).Foreground(lipgloss.Color("250"))
 	case "line":
 		return base.Foreground(lipgloss.Color("238"))
+	case "dash":
+		return base.Foreground(lipgloss.Color("244"))
 	case "muted":
 		return base.Foreground(lipgloss.Color("244"))
 	case "value":
@@ -870,7 +1082,13 @@ func styledCell(color bool, value string, width int, right bool, styleName strin
 		value = stripped
 	}
 	rendered := cell(value, width, right)
-	if strings.TrimSpace(value) == "" || styleName == "" {
+	if strings.TrimSpace(value) == "" {
+		return rendered
+	}
+	if strings.TrimSpace(value) == "-" {
+		styleName = "dash"
+	}
+	if styleName == "" {
 		return rendered
 	}
 	return style(color, styleName).Render(rendered)
