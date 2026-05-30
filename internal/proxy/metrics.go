@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -137,13 +138,9 @@ func (m *Metrics) Snapshot() Snapshot {
 	defer m.mu.RUnlock()
 
 	statusCodes := make(map[int]int64, len(m.statusCodes))
-	for code, count := range m.statusCodes {
-		statusCodes[code] = count
-	}
+	maps.Copy(statusCodes, m.statusCodes)
 	models := make(map[string]ModelStats, len(m.models))
-	for model, stats := range m.models {
-		models[model] = stats
-	}
+	maps.Copy(models, m.models)
 	recent := append([]RequestRecord(nil), m.recent...)
 
 	return Snapshot{
