@@ -56,7 +56,7 @@ func run() error {
 	flag.StringVar(&logPath, "log", "", "Write request/response payload logs to this file")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
 	flag.BoolVar(&showHelp, "help", false, "Show help")
-	flag.BoolVar(&headless, "headless", false, "Skip the interactive TUI and run the proxy in the background")
+	flag.BoolVar(&headless, "headless", false, "Skip the interactive TUI and run the proxy in the foreground")
 	flag.Parse()
 
 	if showVersion {
@@ -163,7 +163,7 @@ Usage:
 Options:
   --config PATH       Path to YAML config file (env: LOCALMODELPROXY_CONFIG)
   --log PATH          Write request and response payload logs to PATH
-  --headless          Skip the interactive TUI and run the proxy in the background
+  --headless          Skip the interactive TUI and run the proxy in the foreground
   --version           Print version and exit
   --help              Print help and exit
 

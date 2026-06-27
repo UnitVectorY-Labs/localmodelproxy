@@ -28,7 +28,7 @@ Override it with `--config` or `LOCALMODELPROXY_CONFIG`.
 |------|----------|-------|
 | `--config` | path | YAML config path. Overrides `LOCALMODELPROXY_CONFIG` and the default `~/.localmodelproxy`. |
 | `--log` | path | Appends request and response payload logs to the specified file. |
-| `--headless` | | Skips the interactive TUI and runs the proxy silently in the foreground. The process continues running until interrupted. |
+| `--headless` | | Skips the interactive TUI and runs the proxy silently in the foreground. The process continues running until interrupted |
 | `--version` | | Prints version and exits. |
 | `--help` | | Prints help and exits. |
 
