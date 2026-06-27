@@ -28,6 +28,7 @@ Override it with `--config` or `LOCALMODELPROXY_CONFIG`.
 |------|----------|-------|
 | `--config` | path | YAML config path. Overrides `LOCALMODELPROXY_CONFIG` and the default `~/.localmodelproxy`. |
 | `--log` | path | Appends request and response payload logs to the specified file. |
+| `--headless` | | Skips the interactive TUI and runs the proxy silently in the foreground. The process continues running until interrupted |
 | `--version` | | Prints version and exits. |
 | `--help` | | Prints help and exits. |
 
@@ -87,7 +88,7 @@ backends:
 | `ui.test.system_message` | no | `"You are a helpful assistant."` | System message sent with test requests. |
 | `ui.test.user_message` | no | `"Reply with a short test message to confirm this connection is working."` | User message sent with test requests. |
 
-The app uses the TUI when stdout is an interactive terminal. When stdout is not a terminal, it prints plain startup and summary lines.
+The app uses the TUI when stdout is an interactive terminal and `--headless` is not set. When stdout is not a terminal, it prints plain startup and summary lines. When `--headless` is provided, all UI output is suppressed and the proxy runs silently until interrupted.
 
 ### TUI Navigation
 

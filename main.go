@@ -50,11 +50,13 @@ func run() error {
 	var logPath string
 	var showVersion bool
 	var showHelp bool
+	var headless bool
 
 	flag.StringVar(&flags.ConfigPath, "config", "", "Path to YAML config file (env: LOCALMODELPROXY_CONFIG)")
 	flag.StringVar(&logPath, "log", "", "Write request/response payload logs to this file")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
 	flag.BoolVar(&showHelp, "help", false, "Show help")
+	flag.BoolVar(&headless, "headless", false, "Skip the interactive TUI and run the proxy in the foreground")
 	flag.Parse()
 
 	if showVersion {
@@ -109,7 +111,7 @@ func run() error {
 		done <- server.ListenAndServe()
 	}()
 
-	renderer := ui.Start(ctx, cancel, cfg, metrics, os.Stdout, os.Stderr)
+	renderer := ui.Start(ctx, cancel, cfg, metrics, os.Stdout, os.Stderr, headless)
 	defer renderer.Stop()
 
 	select {
@@ -161,6 +163,7 @@ Usage:
 Options:
   --config PATH       Path to YAML config file (env: LOCALMODELPROXY_CONFIG)
   --log PATH          Write request and response payload logs to PATH
+  --headless          Skip the interactive TUI and run the proxy in the foreground
   --version           Print version and exit
   --help              Print help and exit
 
