@@ -27,8 +27,8 @@ type Renderer struct {
 	input   context.CancelFunc
 }
 
-func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config, metrics *proxy.Metrics, out, errOut *os.File) *Renderer {
-	mode := resolveMode(out)
+func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config, metrics *proxy.Metrics, out, errOut *os.File, headless bool) *Renderer {
+	mode := resolveMode(out, headless)
 	renderer := &Renderer{
 		cfg:     cfg,
 		metrics: metrics,
@@ -82,7 +82,10 @@ func (r *Renderer) FinalSummary() {
 	}
 }
 
-func resolveMode(out *os.File) string {
+func resolveMode(out *os.File, headless bool) string {
+	if headless {
+		return "headless"
+	}
 	if term.IsTerminal(int(out.Fd())) {
 		return "tui"
 	}
