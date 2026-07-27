@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,7 +15,7 @@ func TestMouseClickSelectsTabAndModel(t *testing.T) {
 	lines := m.hitTestLines()
 
 	updated, _ := m.Update(tea.MouseMsg{
-		X:      len("[Stats]  "),
+		X:      strings.Index(lines[findLine(t, lines, "[Stats]")], "[Test]") + 1,
 		Y:      screenY(findLine(t, lines, "[Stats]")),
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
@@ -45,7 +46,7 @@ func TestMouseClickTestTabDoesNotStartSelectedModelTest(t *testing.T) {
 	lines := m.hitTestLines()
 
 	updated, cmd := m.Update(tea.MouseMsg{
-		X:      len("[Stats]  "),
+		X:      strings.Index(lines[findLine(t, lines, "[Stats]")], "[Test]") + 1,
 		Y:      screenY(findLine(t, lines, "[Stats]")),
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
@@ -59,6 +60,81 @@ func TestMouseClickTestTabDoesNotStartSelectedModelTest(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Fatal("did not expect test command after clicking Test tab")
+	}
+}
+
+func TestReconcileModelsCombinesConfigAndDiscovery(t *testing.T) {
+	cfg := &config.Config{Backends: []config.BackendConfig{{
+		Name: "backend", Models: config.BackendModels{Models: []config.Model{
+			{ID: "local-valid", UpstreamID: "upstream-valid"},
+			{ID: "local-missing"},
+		}},
+	}}}
+	results := []proxy.ModelDiscovery{{Backend: "backend", StatusCode: 200, Models: []proxy.DiscoveredModel{
+		{ID: "upstream-valid", Details: []byte(`{"id":"upstream-valid","owned_by":"test"}`)},
+		{ID: "unconfigured", Details: []byte(`{"id":"unconfigured"}`)},
+	}}}
+
+	rows := reconcileModels(cfg, results)
+	if len(rows) != 3 {
+		t.Fatalf("expected three combined rows, got %#v", rows)
+	}
+	statuses := map[string]string{}
+	for _, row := range rows {
+		statuses[row.upstreamID] = row.status
+	}
+	if statuses["upstream-valid"] != "MATCH" || statuses["local-missing"] != "MISSING" || statuses["unconfigured"] != "UNCONFIGURED" {
+		t.Fatalf("unexpected reconciliation statuses: %#v", statuses)
+	}
+}
+
+func TestReconcileModelsUsesUnknownWhenDiscoveryFails(t *testing.T) {
+	cfg := &config.Config{Backends: []config.BackendConfig{{
+		Name: "backend", Models: config.BackendModels{Models: []config.Model{{ID: "model"}}},
+	}}}
+	rows := reconcileModels(cfg, []proxy.ModelDiscovery{{Backend: "backend", Err: fmt.Errorf("unavailable")}})
+	if len(rows) != 1 || rows[0].status != "UNKNOWN" || rows[0].rowStyle != "yellow" {
+		t.Fatalf("failed discovery must not report a model missing: %#v", rows)
+	}
+}
+
+func TestModelsTabOpensDetailsAndReturns(t *testing.T) {
+	m := testTUIModel()
+	m.activeTab = tabModels
+	m.discoveryLoaded = true
+	m.diagnosticModels = []diagnosticModel{{upstreamID: "alpha", details: `{"id":"alpha"}`}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(tuiModel)
+	if !m.diagnosticDetail || !strings.Contains(m.View(), "Model Details") {
+		t.Fatal("expected model details page")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(tuiModel)
+	if m.diagnosticDetail {
+		t.Fatal("expected escape to return to model list")
+	}
+}
+
+func TestModelsDiagnosticUsesColorOrStatusColumn(t *testing.T) {
+	m := testTUIModel()
+	m.activeTab = tabModels
+	m.discoveryLoaded = true
+	m.diagnosticModels = []diagnosticModel{{backend: "backend", localID: "model", upstreamID: "model", status: "MATCH", rowStyle: "green"}}
+
+	m.color = true
+	colored := stripANSIEscapes(m.viewModels(m.tableWidth()))
+	if strings.Contains(colored, "Status") || strings.Contains(colored, "Green:") {
+		t.Fatalf("colored view should use color without color-name labels:\n%s", colored)
+	}
+	if !strings.Contains(colored, "config + response") {
+		t.Fatalf("colored view should retain a descriptive legend:\n%s", colored)
+	}
+
+	m.color = false
+	plain := m.viewModels(m.tableWidth())
+	if !strings.Contains(plain, "Status") || !strings.Contains(plain, "MATCH") {
+		t.Fatalf("plain view should add a textual status column:\n%s", plain)
 	}
 }
 

@@ -92,12 +92,31 @@ The app uses the TUI when stdout is an interactive terminal and `--headless` is 
 
 ### TUI Navigation
 
-When the Test tab is enabled (the default), the TUI has two views accessible via the **Tab** key:
+The TUI has the following views, accessible with **Tab**, **←/→**, or **h/l**:
 
 - **Stats** – Displays per-model statistics and recent requests (the default view).
+- **Models** – Queries every upstream backend's `/models` endpoint and compares the response with the configured models.
 - **Test** – Lists all configured models. Use **↑/↓** to select a model and **Enter** to send a test request. The response is displayed inline.
 
 Test requests go through the proxy like any other request, so they count towards stats and token usage.
+
+### Model Discovery Diagnostics
+
+Opening the **Models** tab calls the OpenAI-compatible `/models` endpoint on each configured upstream backend. The request uses the backend's configured base URL, authentication, HTTP client, and TLS settings. It does not compare against the proxy's own `GET /v1/models` endpoint, because that endpoint is generated from the config itself.
+
+The combined list distinguishes the source and consistency of every model:
+
+| Color | Status | Meaning |
+|-------|--------|---------|
+| Green | `MATCH` | A configured model's effective upstream ID was returned by that backend. |
+| Red | `MISSING` | The backend responded successfully but did not return the configured upstream ID. |
+| Cyan | `UNCONFIGURED` | The backend returned a model that is not explicitly present in its config. |
+| Green | `ALLOWED` | A response model is accepted by a backend configured with `models: all`. |
+| Yellow | `UNKNOWN` | Discovery failed, so whether the configured model exists cannot be determined. |
+
+With color enabled, row colors carry the status and the legend shows colored descriptions without repeating color names. When `NO_COLOR` is set, the list adds a textual **Status** column instead.
+
+For configured aliases, matching uses `upstream_id`; when it is omitted, matching uses the local `id`. Use **↑/↓** to select a row and **Enter** to open its detail page. The detail page includes the complete JSON object returned for that model, including provider-specific fields. Use **Esc** or **Backspace** to return to the list, and **R** to query all backends again. Backend-level HTTP, authentication, parsing, and connection failures are shown above the list.
 
 ## Backends
 

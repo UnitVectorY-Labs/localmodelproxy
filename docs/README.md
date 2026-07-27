@@ -29,7 +29,7 @@ Use it when you want to:
 
 `localmodelproxy` listens on `127.0.0.1` by default and exposes:
 
-- `GET /v1/models` — always returns the configured models list
+- `GET /v1/models` — always returns the configured models list. The interactive TUI's **Models** diagnostic tab separately queries upstream `/models` endpoints and compares their responses with this configuration.
 - `POST /v1/chat/completions` — validated against configured model IDs and forwarded to the matching backend
 
 The proxy selects a backend by inspecting the request model, validates it against configured model IDs (returning a 400 `model_not_found` error if not found), forwards the request transparently, rewrites model aliases when configured, applies the backend's authentication method, and aggregates token usage and optional cost from the response.

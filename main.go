@@ -111,7 +111,7 @@ func run() error {
 		done <- server.ListenAndServe()
 	}()
 
-	renderer := ui.Start(ctx, cancel, cfg, metrics, os.Stdout, os.Stderr, headless)
+	renderer := ui.Start(ctx, cancel, cfg, metrics, handler, os.Stdout, os.Stderr, headless)
 	defer renderer.Stop()
 
 	select {
