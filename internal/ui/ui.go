@@ -2,7 +2,9 @@ package ui
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -27,7 +29,7 @@ type Renderer struct {
 	input   context.CancelFunc
 }
 
-func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config, metrics *proxy.Metrics, out, errOut *os.File, headless bool) *Renderer {
+func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config, metrics *proxy.Metrics, modelDiscoverer modelDiscoverer, out, errOut *os.File, headless bool) *Renderer {
 	mode := resolveMode(out, headless)
 	renderer := &Renderer{
 		cfg:     cfg,
@@ -40,7 +42,7 @@ func Start(ctx context.Context, shutdown context.CancelFunc, cfg *config.Config,
 	case "tui":
 		tuiCtx, cancel := context.WithCancel(ctx)
 		renderer.cancel = cancel
-		model := tuiModel{cfg: cfg, metrics: metrics, shutdown: shutdown, color: colorEnabled(), testResults: make(map[string]string), allModels: []string{"Total"}}
+		model := tuiModel{cfg: cfg, metrics: metrics, discoverer: modelDiscoverer, discoveryCtx: tuiCtx, shutdown: shutdown, color: colorEnabled(), testResults: make(map[string]string), allModels: []string{"Total"}}
 		renderer.program = tea.NewProgram(model, tea.WithOutput(out), tea.WithContext(tuiCtx), tea.WithAltScreen(), tea.WithMouseAllMotion())
 		go func() {
 			_, _ = renderer.program.Run()
@@ -140,15 +142,34 @@ type testResultMsg struct {
 	err     error
 }
 
+type modelDiscoverer interface {
+	DiscoverModels(context.Context) []proxy.ModelDiscovery
+}
+
+type discoveryResultMsg struct {
+	results []proxy.ModelDiscovery
+}
+
+type diagnosticModel struct {
+	backend    string
+	localID    string
+	upstreamID string
+	status     string
+	rowStyle   string
+	details    string
+}
+
 const (
-	tabStats = 0
-	tabTest  = 1
+	tabStats  = 0
+	tabModels = 1
+	tabTest   = 2
 )
 
 const (
 	hoverNone = iota
 	hoverTab
 	hoverModel
+	hoverDiagnostic
 )
 
 const screenTopPadding = 1
@@ -157,15 +178,18 @@ type hoverTarget struct {
 	kind  int
 	tab   int
 	model string
+	index int
 }
 
 type tuiModel struct {
-	cfg      *config.Config
-	metrics  *proxy.Metrics
-	shutdown context.CancelFunc
-	color    bool
-	width    int
-	height   int
+	cfg          *config.Config
+	metrics      *proxy.Metrics
+	discoverer   modelDiscoverer
+	discoveryCtx context.Context
+	shutdown     context.CancelFunc
+	color        bool
+	width        int
+	height       int
 
 	// Tab navigation
 	activeTab int
@@ -178,6 +202,14 @@ type tuiModel struct {
 	// Test tab state
 	testRunning bool
 	testResults map[string]string // model -> result or error
+
+	// Models diagnostic tab state
+	discoveryRunning bool
+	discoveryLoaded  bool
+	discoveryResults []proxy.ModelDiscovery
+	diagnosticModels []diagnosticModel
+	diagnosticCursor int
+	diagnosticDetail bool
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -194,16 +226,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "tab", "right", "l":
-			if m.cfg.UI.TestEnabled() {
-				m.activeTab = (m.activeTab + 1) % 2
-			}
-			return m, nil
+			m.activeTab = m.nextTab(1)
+			return m, m.startDiscoveryIfNeeded()
 		case "shift+tab", "left", "h":
-			if m.cfg.UI.TestEnabled() {
-				m.activeTab = (m.activeTab - 1 + 2) % 2
-			}
-			return m, nil
+			m.activeTab = m.nextTab(-1)
+			return m, m.startDiscoveryIfNeeded()
 		case "up", "k":
+			if m.activeTab == tabModels {
+				m.moveDiagnosticCursor(-1)
+				return m, nil
+			}
 			if len(m.allModels) > 0 {
 				m.modelCursor--
 				if m.modelCursor < 0 {
@@ -212,6 +244,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "down", "j":
+			if m.activeTab == tabModels {
+				m.moveDiagnosticCursor(1)
+				return m, nil
+			}
 			if len(m.allModels) > 0 {
 				m.modelCursor++
 				if m.modelCursor >= len(m.allModels) {
@@ -225,6 +261,20 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 			}
+			if m.activeTab == tabModels && len(m.diagnosticModels) > 0 {
+				m.diagnosticDetail = true
+			}
+			return m, nil
+		case "esc", "backspace":
+			if m.activeTab == tabModels && m.diagnosticDetail {
+				m.diagnosticDetail = false
+			}
+			return m, nil
+		case "r":
+			if m.activeTab == tabModels && !m.discoveryRunning {
+				m.discoveryLoaded = false
+				return m, m.startDiscoveryIfNeeded()
+			}
 			return m, nil
 		default:
 			return m, nil
@@ -235,9 +285,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 			switch target.kind {
 			case hoverTab:
-				if m.cfg.UI.TestEnabled() {
-					m.activeTab = target.tab
-				}
+				m.activeTab = target.tab
+				return m, m.startDiscoveryIfNeeded()
 			case hoverModel:
 				if idx := m.modelIndex(target.model); idx >= 0 {
 					m.modelCursor = idx
@@ -246,6 +295,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, cmd
 						}
 					}
+				}
+			case hoverDiagnostic:
+				if target.index >= 0 && target.index < len(m.diagnosticModels) {
+					m.diagnosticCursor = target.index
+					m.diagnosticDetail = true
 				}
 			}
 		}
@@ -256,6 +310,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.testResults[msg.model] = "Error: " + msg.err.Error()
 		} else {
 			m.testResults[msg.model] = msg.content
+		}
+		return m, nil
+	case discoveryResultMsg:
+		m.discoveryRunning = false
+		m.discoveryLoaded = true
+		m.discoveryResults = msg.results
+		m.diagnosticModels = reconcileModels(m.cfg, msg.results)
+		if m.diagnosticCursor >= len(m.diagnosticModels) {
+			m.diagnosticCursor = 0
 		}
 		return m, nil
 	case tickMsg:
@@ -279,6 +342,162 @@ func (m tuiModel) buildStatsModelList() []string {
 	result = append(result, "Total")
 	result = append(result, names...)
 	return result
+}
+
+func (m tuiModel) availableTabs() []int {
+	tabs := []int{tabStats, tabModels}
+	if m.cfg.UI.TestEnabled() {
+		tabs = append(tabs, tabTest)
+	}
+	return tabs
+}
+
+func (m tuiModel) nextTab(delta int) int {
+	tabs := m.availableTabs()
+	current := 0
+	for i, tab := range tabs {
+		if tab == m.activeTab {
+			current = i
+			break
+		}
+	}
+	return tabs[(current+delta+len(tabs))%len(tabs)]
+}
+
+func (m *tuiModel) startDiscoveryIfNeeded() tea.Cmd {
+	if m.activeTab != tabModels || m.discoveryRunning || m.discoveryLoaded || m.discoverer == nil {
+		return nil
+	}
+	m.discoveryRunning = true
+	return func() tea.Msg {
+		parent := m.discoveryCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+		defer cancel()
+		return discoveryResultMsg{results: m.discoverer.DiscoverModels(ctx)}
+	}
+}
+
+func (m *tuiModel) moveDiagnosticCursor(delta int) {
+	if len(m.diagnosticModels) == 0 || m.diagnosticDetail {
+		return
+	}
+	m.diagnosticCursor = (m.diagnosticCursor + delta + len(m.diagnosticModels)) % len(m.diagnosticModels)
+}
+
+func (m tuiModel) diagnosticWindow() (int, int) {
+	count := len(m.diagnosticModels)
+	if count == 0 || m.height <= 0 {
+		return 0, count
+	}
+	pageSize := m.height - 18 - len(m.discoveryResults)
+	if pageSize < 3 {
+		pageSize = 3
+	}
+	if pageSize >= count {
+		return 0, count
+	}
+	start := m.diagnosticCursor - pageSize/2
+	if start < 0 {
+		start = 0
+	}
+	if start+pageSize > count {
+		start = count - pageSize
+	}
+	return start, start + pageSize
+}
+
+func reconcileModels(cfg *config.Config, results []proxy.ModelDiscovery) []diagnosticModel {
+	byBackend := make(map[string]proxy.ModelDiscovery, len(results))
+	for _, result := range results {
+		byBackend[result.Backend] = result
+	}
+
+	var rows []diagnosticModel
+	for _, backend := range cfg.Backends {
+		result, queried := byBackend[backend.Name]
+		discovered := make(map[string]proxy.DiscoveredModel, len(result.Models))
+		matched := make(map[string]bool)
+		for _, model := range result.Models {
+			discovered[model.ID] = model
+		}
+
+		for _, configured := range backend.Models.Models {
+			upstreamID := configured.UpstreamID
+			if upstreamID == "" {
+				upstreamID = configured.ID
+			}
+			row := diagnosticModel{
+				backend: backend.Name, localID: configured.ID, upstreamID: upstreamID,
+				status: "MISSING", rowStyle: "red",
+				details: configuredModelDetails(backend, configured),
+			}
+			if found, ok := discovered[upstreamID]; ok {
+				row.status, row.rowStyle = "MATCH", "green"
+				row.details = combinedModelDetails(backend, configured, found)
+				matched[upstreamID] = true
+			} else if !queried || result.Err != nil {
+				row.status = "UNKNOWN"
+				row.rowStyle = "yellow"
+			}
+			rows = append(rows, row)
+		}
+		for upstreamID := range matched {
+			delete(discovered, upstreamID)
+		}
+
+		for _, found := range discovered {
+			status, rowStyle := "UNCONFIGURED", "cyan"
+			if backend.Models.All {
+				status, rowStyle = "ALLOWED", "green"
+			}
+			rows = append(rows, diagnosticModel{
+				backend: backend.Name, upstreamID: found.ID,
+				status: status, rowStyle: rowStyle,
+				details: responseModelDetails(backend.Name, result.URL, found),
+			})
+		}
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].backend != rows[j].backend {
+			return rows[i].backend < rows[j].backend
+		}
+		return rows[i].upstreamID < rows[j].upstreamID
+	})
+	return rows
+}
+
+func configuredModelDetails(backend config.BackendConfig, model config.Model) string {
+	upstreamID := model.UpstreamID
+	if upstreamID == "" {
+		upstreamID = model.ID
+	}
+	return modelConfigDetails(backend.Name, model.ID, upstreamID, model.Cost) +
+		"\n\nNo matching model was returned by the upstream /models endpoint."
+}
+
+func combinedModelDetails(backend config.BackendConfig, configured config.Model, found proxy.DiscoveredModel) string {
+	return modelConfigDetails(backend.Name, configured.ID, found.ID, configured.Cost) +
+		"\n\n/models response:\n" + prettyJSON(found.Details)
+}
+
+func modelConfigDetails(backend, localID, upstreamID string, cost config.ModelCost) string {
+	return fmt.Sprintf("Backend: %s\nLocal ID: %s\nUpstream ID: %s\nConfigured cost per million tokens: input %.6f, output %.6f, cache %.6f",
+		backend, localID, upstreamID, cost.InputPerMillion, cost.OutputPerMillion, cost.CachePerMillion)
+}
+
+func responseModelDetails(backend, endpoint string, found proxy.DiscoveredModel) string {
+	return fmt.Sprintf("Backend: %s\nEndpoint: %s\nUpstream ID: %s\n\n/models response:\n%s", backend, endpoint, found.ID, prettyJSON(found.Details))
+}
+
+func prettyJSON(raw json.RawMessage) string {
+	var formatted bytes.Buffer
+	if err := json.Indent(&formatted, raw, "", "  "); err != nil {
+		return string(raw)
+	}
+	return formatted.String()
 }
 
 func (m tuiModel) buildModelList() []string {
@@ -352,29 +571,34 @@ func (m tuiModel) View() string {
 		)
 	}
 
-	if m.cfg.UI.TestEnabled() {
-		header.WriteString(m.renderTabBar())
-		header.WriteByte('\n')
-		header.WriteByte('\n')
-	}
+	header.WriteString(m.renderTabBar())
+	header.WriteByte('\n')
+	header.WriteByte('\n')
 
 	// --- Main content ---
 	var content string
 	switch m.activeTab {
 	case tabStats:
 		content = m.viewStats(tableWidth)
+	case tabModels:
+		content = m.viewModels(tableWidth)
 	case tabTest:
 		content = m.viewTest(tableWidth)
 	}
 
 	// --- Footer ---
 	var footer strings.Builder
-	if m.cfg.UI.TestEnabled() {
-		footer.WriteString(muted.Render("←/→: switch view • "))
-	}
+	footer.WriteString(muted.Render("←/→: switch view • "))
 	footer.WriteString(muted.Render("↑/↓: select • "))
 	if m.activeTab == tabTest {
 		footer.WriteString(muted.Render("Enter: test • "))
+	}
+	if m.activeTab == tabModels {
+		if m.diagnosticDetail {
+			footer.WriteString(muted.Render("Esc: back • "))
+		} else {
+			footer.WriteString(muted.Render("Enter: details • R: refresh • "))
+		}
 	}
 	footer.WriteString(muted.Render("Ctrl-C or q to stop"))
 
@@ -400,13 +624,15 @@ func (m tuiModel) renderTabBar() string {
 	activeStyle := style(m.color, "tab-active")
 	inactiveStyle := style(m.color, "tab-inactive")
 
-	tabs := []string{"Stats", "Test"}
+	tabNames := map[int]string{tabStats: "Stats", tabModels: "Models", tabTest: "Test"}
+	tabs := m.availableTabs()
 	parts := make([]string, len(tabs))
-	for i, name := range tabs {
-		hovered := m.hover.kind == hoverTab && m.hover.tab == i
-		if i == m.activeTab && hovered {
+	for i, tab := range tabs {
+		name := tabNames[tab]
+		hovered := m.hover.kind == hoverTab && m.hover.tab == tab
+		if tab == m.activeTab && hovered {
 			parts[i] = style(m.color, "tab-active-hover").Render("[" + name + "]")
-		} else if i == m.activeTab {
+		} else if tab == m.activeTab {
 			parts[i] = activeStyle.Render("[" + name + "]")
 		} else if hovered {
 			parts[i] = style(m.color, "tab-hover").Render("[" + name + "]")
@@ -415,6 +641,99 @@ func (m tuiModel) renderTabBar() string {
 		}
 	}
 	return strings.Join(parts, "  ")
+}
+
+func (m tuiModel) viewModels(tableWidth int) string {
+	var b strings.Builder
+	if m.discoveryRunning {
+		b.WriteString(style(m.color, "orange").Render("⏳ Querying upstream /models endpoints..."))
+		b.WriteByte('\n')
+		if !m.discoveryLoaded {
+			return b.String()
+		}
+	}
+	if !m.discoveryLoaded && !m.discoveryRunning {
+		b.WriteString(style(m.color, "muted").Render("Open this tab or press R to query upstream /models endpoints."))
+		b.WriteByte('\n')
+		return b.String()
+	}
+	if m.discoveryLoaded {
+		for _, result := range m.discoveryResults {
+			if result.Err != nil {
+				fmt.Fprintf(&b, "%s %s\n", style(m.color, "red").Render(result.Backend+":"), style(m.color, "red").Render(result.Err.Error()))
+			} else {
+				fmt.Fprintf(&b, "%s %s\n", style(m.color, "green").Render(result.Backend+":"), style(m.color, "muted").Render(fmt.Sprintf("HTTP %d, %d models from %s", result.StatusCode, len(result.Models), result.URL)))
+			}
+		}
+		b.WriteByte('\n')
+	}
+
+	if m.diagnosticDetail && len(m.diagnosticModels) > 0 {
+		selected := m.diagnosticModels[m.diagnosticCursor]
+		b.WriteString(sectionTitle(m.color, "Model Details — "+selected.upstreamID))
+		b.WriteByte('\n')
+		b.WriteString(wrapText(selected.details, tableWidth))
+		b.WriteByte('\n')
+		return b.String()
+	}
+	if m.discoveryLoaded && len(m.diagnosticModels) == 0 {
+		b.WriteString(style(m.color, "muted").Render("No configured or discovered models."))
+		b.WriteByte('\n')
+		return b.String()
+	}
+
+	start, end := m.diagnosticWindow()
+	rows := make([][]string, 0, end-start)
+	for i := start; i < end; i++ {
+		model := m.diagnosticModels[i]
+		indicator := " "
+		if i == m.diagnosticCursor {
+			indicator = withStyle("selected", ">")
+		}
+		styleName := model.rowStyle
+		if i == m.diagnosticCursor {
+			styleName = "selected"
+		}
+		localID := model.localID
+		if localID == "" {
+			localID = "-"
+		}
+		row := []string{
+			indicator,
+			withStyle(styleName, model.backend),
+			withStyle(styleName, localID),
+			withStyle(styleName, model.upstreamID),
+		}
+		if !m.color {
+			row = append(row, model.status)
+		}
+		rows = append(rows, row)
+	}
+	columns := []column{
+		{name: " ", width: 1},
+		{name: "Backend", width: 18},
+		{name: "Local ID", width: 28, flex: true},
+		{name: "Upstream ID", width: 28, flex: true},
+	}
+	if !m.color {
+		columns = append(columns, column{name: "Status", width: 12})
+	}
+	b.WriteString(renderTable(m.color, tableWidth, columns, rows))
+	if m.color {
+		legend := []string{
+			style(true, "green").Render("config + response"),
+			style(true, "red").Render("config only"),
+			style(true, "cyan").Render("response only"),
+			style(true, "yellow").Render("discovery unavailable"),
+		}
+		b.WriteString(strings.Join(legend, "  "))
+		b.WriteByte('\n')
+	}
+	if start > 0 || end < len(m.diagnosticModels) {
+		b.WriteString(style(m.color, "muted").Render(fmt.Sprintf("Showing %d-%d of %d", start+1, end, len(m.diagnosticModels))))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 func (m tuiModel) viewStats(tableWidth int) string {
@@ -519,19 +838,36 @@ func (m tuiModel) hitTarget(x, y int) hoverTarget {
 		return hoverTarget{}
 	}
 	line := lines[y]
-	if m.cfg.UI.TestEnabled() {
-		if statsX := strings.Index(line, "[Stats]"); statsX >= 0 {
-			if x >= statsX && x < statsX+len("[Stats]") {
-				return hoverTarget{kind: hoverTab, tab: tabStats}
-			}
+	for tab, label := range map[int]string{tabStats: "[Stats]", tabModels: "[Models]", tabTest: "[Test]"} {
+		if tab == tabTest && !m.cfg.UI.TestEnabled() {
+			continue
 		}
-		if testX := strings.Index(line, "[Test]"); testX >= 0 {
-			if x >= testX && x < testX+len("[Test]") {
-				return hoverTarget{kind: hoverTab, tab: tabTest}
+		if tabX := strings.Index(line, label); tabX >= 0 {
+			if x >= tabX && x < tabX+len(label) {
+				return hoverTarget{kind: hoverTab, tab: tab}
 			}
 		}
 	}
+	if m.activeTab == tabModels && !m.diagnosticDetail {
+		return m.diagnosticHitTarget(x, y, lines)
+	}
 	return m.modelHitTarget(x, y, lines)
+}
+
+func (m tuiModel) diagnosticHitTarget(x, y int, lines []string) hoverTarget {
+	headerY := -1
+	for i, line := range lines {
+		if strings.Contains(line, "Backend") && strings.Contains(line, "Upstream ID") {
+			headerY = i
+			break
+		}
+	}
+	row := y - headerY - 2
+	start, end := m.diagnosticWindow()
+	if headerY >= 0 && row >= 0 && start+row < end && x < len(lines[y]) {
+		return hoverTarget{kind: hoverDiagnostic, index: start + row}
+	}
+	return hoverTarget{}
 }
 
 func (m tuiModel) hitTestLines() []string {
@@ -632,16 +968,23 @@ func wrapText(text string, width int) string {
 	if width <= 0 {
 		width = 80
 	}
-	if len(text) <= width {
-		return text
-	}
 	var b strings.Builder
-	for len(text) > width {
-		b.WriteString(text[:width])
-		b.WriteByte('\n')
-		text = text[width:]
+	lines := strings.Split(text, "\n")
+	for lineIndex, line := range lines {
+		for len(line) > width {
+			cut := strings.LastIndex(line[:width+1], " ")
+			if cut <= 0 {
+				cut = width
+			}
+			b.WriteString(line[:cut])
+			b.WriteByte('\n')
+			line = strings.TrimLeft(line[cut:], " ")
+		}
+		b.WriteString(line)
+		if lineIndex < len(lines)-1 {
+			b.WriteByte('\n')
+		}
 	}
-	b.WriteString(text)
 	return b.String()
 }
 
@@ -757,12 +1100,12 @@ func fitColumns(columns []column, targetWidth int) []column {
 	for width > targetWidth {
 		flexIndex := -1
 		for i, col := range columns {
-			if col.flex {
+			if col.flex && col.width > 12 {
 				flexIndex = i
 				break
 			}
 		}
-		if flexIndex == -1 || columns[flexIndex].width <= 12 {
+		if flexIndex == -1 {
 			break
 		}
 		columns[flexIndex].width--
@@ -1038,6 +1381,10 @@ func style(color bool, name string) lipgloss.Style {
 		return base.Bold(true).Foreground(lipgloss.Color("42"))
 	case "red":
 		return base.Foreground(lipgloss.Color("203"))
+	case "cyan":
+		return base.Foreground(lipgloss.Color("81"))
+	case "yellow":
+		return base.Foreground(lipgloss.Color("220"))
 	case "bold":
 		return base.Bold(true)
 	case "title":

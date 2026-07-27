@@ -103,6 +103,50 @@ func TestModelsEmpty(t *testing.T) {
 	}
 }
 
+func TestDiscoverModelsCallsUpstreamWithAuthenticationAndPreservesDetails(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer diagnostic-token" {
+			t.Errorf("unexpected authorization %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"z-model","owned_by":"owner"},{"id":"a-model","custom":{"size":7}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig([]config.Model{{ID: "a-model"}})
+	cfg.Backends[0].BaseURL = upstream.URL + "/v1"
+	handler := mustNew(t, Options{Config: cfg, TokenProvider: StaticTokenProvider("diagnostic-token"), Metrics: NewMetrics()})
+	results := handler.DiscoverModels(context.Background())
+
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("unexpected discovery result: %#v", results)
+	}
+	if results[0].StatusCode != http.StatusOK || len(results[0].Models) != 2 {
+		t.Fatalf("unexpected discovery response: %#v", results[0])
+	}
+	if results[0].Models[0].ID != "a-model" || !strings.Contains(string(results[0].Models[0].Details), `"size":7`) {
+		t.Fatalf("model details were not sorted/preserved: %#v", results[0].Models)
+	}
+}
+
+func TestDiscoverModelsReportsBackendHTTPError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not available", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	cfg := testConfig([]config.Model{{ID: "missing"}})
+	cfg.Backends[0].BaseURL = upstream.URL + "/v1"
+	handler := mustNew(t, Options{Config: cfg, TokenProvider: StaticTokenProvider("token"), Metrics: NewMetrics()})
+
+	results := handler.DiscoverModels(context.Background())
+	if len(results) != 1 || results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "HTTP 503") {
+		t.Fatalf("expected per-backend HTTP error, got %#v", results)
+	}
+}
+
 func TestChatCompletionsMissingModel(t *testing.T) {
 	handler := mustNew(t, Options{
 		Config:        testConfig([]config.Model{{ID: "google/gemini-2.5-flash"}}),
