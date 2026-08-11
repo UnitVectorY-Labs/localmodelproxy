@@ -44,12 +44,12 @@ backends:
     auth:
       type: google_adc
     models:
-      - id: gemini-3.1-flash-lite-preview
-        upstream_id: google/gemini-3.1-flash-lite-preview
+      - id: gemini-3.6-flash
+        upstream_id: google/gemini-3.6-flash
         cost:
-          input_per_million: 0.30
-          output_per_million: 2.50
-          cache_per_million: 0.075
+          input_per_million: 1.50
+          output_per_million: 7.50
+          cache_per_million: 0.15
 ```
 
 Authenticate:
@@ -64,7 +64,7 @@ Validate:
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-3.1-flash-lite-preview",
+    "model": "gemini-3.6-flash",
     "messages": [
       {"role": "user", "content": "Reply with one short sentence."}
     ]
@@ -205,8 +205,8 @@ backends:
     auth:
       type: google_adc
     models:
-      - id: gemini-3.1-flash-lite-preview
-        upstream_id: google/gemini-3.1-flash-lite-preview
+      - id: gemini-3.6-flash
+        upstream_id: google/gemini-3.6-flash
 
   - name: hosted
     type: openai_compatible
@@ -228,7 +228,7 @@ backends:
 
 Routing behavior:
 
-- `gemini-3.1-flash-lite-preview` routes to `cloud`
+- `gemini-3.6-flash` routes to `cloud`
 - `hosted-small` and `hosted-large` route to `hosted`
 - any other model routes to `local` because it uses `models: all`
 
