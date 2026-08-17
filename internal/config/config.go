@@ -45,8 +45,15 @@ type BackendConfig struct {
 	Project            string        `yaml:"project"`
 	Location           string        `yaml:"location"`
 	InsecureSkipVerify bool          `yaml:"insecure_skip_verify"`
+	ModelDiscovery     *bool         `yaml:"model_discovery"`
 	Auth               AuthConfig    `yaml:"auth"`
 	Models             BackendModels `yaml:"models"`
+}
+
+// ModelDiscoveryEnabled returns whether the Models TUI tab should query this
+// backend's upstream /v1/models endpoint. It defaults to true.
+func (bc *BackendConfig) ModelDiscoveryEnabled() bool {
+	return bc.ModelDiscovery == nil || *bc.ModelDiscovery
 }
 
 // AuthConfig describes how to authenticate against a backend.

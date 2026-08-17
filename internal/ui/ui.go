@@ -438,7 +438,7 @@ func reconcileModels(cfg *config.Config, results []proxy.ModelDiscovery) []diagn
 				row.status, row.rowStyle = "MATCH", "green"
 				row.details = combinedModelDetails(backend, configured, found)
 				matched[upstreamID] = true
-			} else if !queried || result.Err != nil {
+			} else if !queried || result.Err != nil || result.Skipped {
 				row.status = "UNKNOWN"
 				row.rowStyle = "yellow"
 			}
@@ -659,7 +659,9 @@ func (m tuiModel) viewModels(tableWidth int) string {
 	}
 	if m.discoveryLoaded {
 		for _, result := range m.discoveryResults {
-			if result.Err != nil {
+			if result.Skipped {
+				fmt.Fprintf(&b, "%s %s\n", style(m.color, "muted").Render(result.Backend+":"), style(m.color, "muted").Render("model discovery disabled by configuration"))
+			} else if result.Err != nil {
 				fmt.Fprintf(&b, "%s %s\n", style(m.color, "red").Render(result.Backend+":"), style(m.color, "red").Render(result.Err.Error()))
 			} else {
 				fmt.Fprintf(&b, "%s %s\n", style(m.color, "green").Render(result.Backend+":"), style(m.color, "muted").Render(fmt.Sprintf("HTTP %d, %d models from %s", result.StatusCode, len(result.Models), result.URL)))

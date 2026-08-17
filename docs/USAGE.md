@@ -95,14 +95,14 @@ The app uses the TUI when stdout is an interactive terminal and `--headless` is 
 The TUI has the following views, accessible with **Tab**, **←/→**, or **h/l**:
 
 - **Stats** – Displays per-model statistics and recent requests (the default view).
-- **Models** – Queries every upstream backend's `/models` endpoint and compares the response with the configured models.
+- **Models** – Queries each enabled upstream backend's `/models` endpoint and compares the response with the configured models.
 - **Test** – Lists all configured models. Use **↑/↓** to select a model and **Enter** to send a test request. The response is displayed inline.
 
 Test requests go through the proxy like any other request, so they count towards stats and token usage.
 
 ### Model Discovery Diagnostics
 
-Opening the **Models** tab calls the OpenAI-compatible `/models` endpoint on each configured upstream backend. The request uses the backend's configured base URL, authentication, HTTP client, and TLS settings. It does not compare against the proxy's own `GET /v1/models` endpoint, because that endpoint is generated from the config itself.
+Opening the **Models** tab calls the OpenAI-compatible `/models` endpoint on each enabled upstream backend. The request uses the backend's configured base URL, authentication, HTTP client, and TLS settings. It does not compare against the proxy's own `GET /v1/models` endpoint, because that endpoint is generated from the config itself. Set a backend's `model_discovery: false` when its provider does not support the endpoint; the TUI shows it as disabled instead of sending a request.
 
 The combined list distinguishes the source and consistency of every model:
 
@@ -130,6 +130,7 @@ Each backend declares where requests go, how they authenticate, and which models
 | `project` | yes* | Google Cloud project for `gcp_openai` when `base_url` is omitted. |
 | `location` | yes* | Google Cloud location for `gcp_openai` when `base_url` is omitted. Defaults to `global` when project is configured. |
 | `insecure_skip_verify` | no | Disables TLS certificate verification for backend API calls. Defaults to `false`. |
+| `model_discovery` | no | Whether the Models TUI tab queries this backend's upstream `/v1/models` endpoint. Defaults to `true`; set to `false` for providers that do not support it. |
 | `auth` | yes | Auth configuration. |
 | `models` | yes | `all` or a list of model entries. |
 
