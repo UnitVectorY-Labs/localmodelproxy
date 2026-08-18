@@ -44,6 +44,8 @@ backends:
     type: gcp_openai
     project: your-google-cloud-project
     location: global
+    # Vertex AI's OpenAI-compatible endpoint does not provide /v1/models.
+    model_discovery: false
     auth:
       type: google_adc
     models:

@@ -142,8 +142,27 @@ func TestDiscoverModelsReportsBackendHTTPError(t *testing.T) {
 	handler := mustNew(t, Options{Config: cfg, TokenProvider: StaticTokenProvider("token"), Metrics: NewMetrics()})
 
 	results := handler.DiscoverModels(context.Background())
-	if len(results) != 1 || results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "HTTP 503") {
+	if len(results) != 1 || results[0].Err == nil || results[0].Err.Error() != "HTTP 503 Service Unavailable" {
 		t.Fatalf("expected per-backend HTTP error, got %#v", results)
+	}
+}
+
+func TestDiscoverModelsSkipsDisabledBackends(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer upstream.Close()
+
+	disabled := false
+	cfg := testConfig([]config.Model{{ID: "model"}})
+	cfg.Backends[0].BaseURL = upstream.URL + "/v1"
+	cfg.Backends[0].ModelDiscovery = &disabled
+	handler := mustNew(t, Options{Config: cfg, TokenProvider: StaticTokenProvider("token"), Metrics: NewMetrics()})
+
+	results := handler.DiscoverModels(context.Background())
+	if len(results) != 1 || !results[0].Skipped || results[0].Err != nil || called {
+		t.Fatalf("expected disabled discovery without an upstream request, got %#v (called=%t)", results, called)
 	}
 }
 

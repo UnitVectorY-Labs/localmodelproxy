@@ -26,6 +26,7 @@ type ModelDiscovery struct {
 	StatusCode int
 	Models     []DiscoveredModel
 	Err        error
+	Skipped    bool
 }
 
 // DiscoverModels queries every configured backend's OpenAI-compatible /models
@@ -36,6 +37,10 @@ func (p *Proxy) DiscoverModels(ctx context.Context) []ModelDiscovery {
 	results := make([]ModelDiscovery, len(p.backends))
 	var wg sync.WaitGroup
 	for i, backend := range p.backends {
+		if !backend.cfg.ModelDiscoveryEnabled() {
+			results[i] = ModelDiscovery{Backend: backend.cfg.Name, Skipped: true}
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -87,7 +92,7 @@ func (p *Proxy) discoverBackendModels(ctx context.Context, backend *resolvedBack
 		return result
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		result.Err = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateForError(string(body), 200))
+		result.Err = fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 		return result
 	}
 
@@ -114,11 +119,4 @@ func (p *Proxy) discoverBackendModels(ctx context.Context, backend *resolvedBack
 	}
 	sort.Slice(result.Models, func(i, j int) bool { return result.Models[i].ID < result.Models[j].ID })
 	return result
-}
-
-func truncateForError(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit] + "..."
 }

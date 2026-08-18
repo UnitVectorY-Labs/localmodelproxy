@@ -98,6 +98,19 @@ func TestReconcileModelsUsesUnknownWhenDiscoveryFails(t *testing.T) {
 	}
 }
 
+func TestModelsViewShowsDisabledDiscoveryWithoutError(t *testing.T) {
+	m := testTUIModel()
+	m.activeTab = tabModels
+	m.discoveryLoaded = true
+	m.discoveryResults = []proxy.ModelDiscovery{{Backend: "google", Skipped: true}}
+	m.diagnosticModels = reconcileModels(m.cfg, m.discoveryResults)
+
+	view := m.viewModels(m.tableWidth())
+	if !strings.Contains(view, "model discovery disabled by configuration") {
+		t.Fatalf("expected disabled-discovery message, got:\n%s", view)
+	}
+}
+
 func TestModelsTabOpensDetailsAndReturns(t *testing.T) {
 	m := testTUIModel()
 	m.activeTab = tabModels

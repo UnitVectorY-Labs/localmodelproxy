@@ -79,6 +79,34 @@ ui:
 	}
 }
 
+func TestLoadBackendModelDiscovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+backends:
+  - name: google
+    type: gcp_openai
+    project: example
+    model_discovery: false
+    auth:
+      type: google_adc
+    models:
+      - id: gemini
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(Flags{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Backends[0].ModelDiscoveryEnabled() {
+		t.Fatal("expected model discovery to be disabled")
+	}
+	if (&BackendConfig{}).ModelDiscoveryEnabled() == false {
+		t.Fatal("expected model discovery to default to enabled")
+	}
+}
+
 func TestRejectsInvalidUIRecentRequests(t *testing.T) {
 	cfg := Config{
 		Server: ServerConfig{Host: DefaultHost, Port: DefaultPort},

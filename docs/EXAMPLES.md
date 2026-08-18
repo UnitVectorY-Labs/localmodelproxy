@@ -41,6 +41,8 @@ backends:
     type: gcp_openai
     project: example
     location: global
+    # Vertex AI's OpenAI-compatible endpoint does not provide /v1/models.
+    model_discovery: false
     auth:
       type: google_adc
     models:
@@ -202,6 +204,8 @@ backends:
     type: gcp_openai
     project: example
     location: global
+    # Vertex AI's OpenAI-compatible endpoint does not provide /v1/models.
+    model_discovery: false
     auth:
       type: google_adc
     models:
