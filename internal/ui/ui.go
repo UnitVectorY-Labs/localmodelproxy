@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"io"
 	"os"
@@ -492,12 +492,12 @@ func responseModelDetails(backend, endpoint string, found proxy.DiscoveredModel)
 	return fmt.Sprintf("Backend: %s\nEndpoint: %s\nUpstream ID: %s\n\n/models response:\n%s", backend, endpoint, found.ID, prettyJSON(found.Details))
 }
 
-func prettyJSON(raw json.RawMessage) string {
-	var formatted bytes.Buffer
-	if err := json.Indent(&formatted, raw, "", "  "); err != nil {
+func prettyJSON(raw jsontext.Value) string {
+	formatted := jsontext.Value(bytes.Clone(raw))
+	if err := formatted.Indent(jsontext.WithIndent("  ")); err != nil {
 		return string(raw)
 	}
-	return formatted.String()
+	return string(formatted)
 }
 
 func (m tuiModel) buildModelList() []string {

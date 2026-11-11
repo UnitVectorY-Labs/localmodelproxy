@@ -5,7 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -507,9 +508,9 @@ func formatPayload(payload []byte) string {
 	if len(trimmed) == 0 {
 		return "<empty>"
 	}
-	var indented bytes.Buffer
-	if json.Indent(&indented, trimmed, "", "  ") == nil {
-		return indented.String()
+	indented := jsontext.Value(bytes.Clone(trimmed))
+	if indented.Indent(jsontext.WithIndent("  ")) == nil {
+		return string(indented)
 	}
 	text := strings.ReplaceAll(string(trimmed), "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", `\r`)
@@ -569,7 +570,8 @@ func writeModels(w http.ResponseWriter, backends []config.BackendConfig) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(response)
+	_ = json.MarshalWrite(w, response)
+	_, _ = w.Write([]byte("\n"))
 }
 
 func copyRequestHeaders(dst, src http.Header) {
@@ -608,7 +610,7 @@ func parseUsage(headers http.Header, body []byte) (usage.TokenUsage, string, boo
 // rewriteJSONModel replaces the "model" field in a JSON object with localModel.
 // Returns the original bytes unchanged if parsing fails or no model field exists.
 func rewriteJSONModel(body []byte, localModel string) []byte {
-	var payload map[string]json.RawMessage
+	var payload map[string]jsontext.Value
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
 	}
@@ -619,7 +621,7 @@ func rewriteJSONModel(body []byte, localModel string) []byte {
 	if err != nil {
 		return body
 	}
-	payload["model"] = json.RawMessage(modelJSON)
+	payload["model"] = jsontext.Value(modelJSON)
 	rewritten, err := json.Marshal(payload)
 	if err != nil {
 		return body
