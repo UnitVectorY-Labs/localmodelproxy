@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"io"
 	"math"
@@ -851,5 +851,31 @@ func TestStreamingThoughtSignatureReinjected(t *testing.T) {
 	signature := thoughtSignature(toolCalls[0].(map[string]any))
 	if signature != "sig-1" {
 		t.Fatalf("thought signature was not reinjected, got %q in %#v", signature, secondBody)
+	}
+}
+
+func TestChatRejectsAmbiguousJSON(t *testing.T) {
+	handler := mustNew(t, Options{Config: testConfig([]config.Model{{ID: "model"}}), Metrics: NewMetrics()})
+	for name, body := range map[string]string{
+		"duplicate model":        `{"model":"model","model":"other"}`,
+		"duplicate nested field": `{"model":"model","messages":[{"role":"user","role":"assistant"}]}`,
+		"invalid UTF-8":          "{\"model\":\"model\",\"text\":\"\xff\"}",
+		"case-sensitive model":   `{"Model":"model"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got status %d, body %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRewriteJSONModelPreservesInvalidResponse(t *testing.T) {
+	for _, body := range []string{`{"model":"upstream","model":"other"}`, "{\"model\":\"upstream\",\"text\":\"\xff\"}"} {
+		if got := string(rewriteJSONModel([]byte(body), "local")); got != body {
+			t.Fatalf("invalid response changed: %q", got)
+		}
 	}
 }
