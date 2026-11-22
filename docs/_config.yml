@@ -1,7 +1,7 @@
 title: localmodelproxy
 description: "Local OpenAI-compatible proxy for routing model requests across configurable backends while handling credentials and tracking token usage."
 
-remote_theme: just-the-docs/just-the-docs@v0.12.0
+remote_theme: UnitVectorY-Labs/uvy-docs-theme@v0.2.0
 plugins:
   - jekyll-remote-theme
 
