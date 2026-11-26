@@ -2,7 +2,8 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +17,7 @@ import (
 // the standard OpenAI fields.
 type DiscoveredModel struct {
 	ID      string
-	Details json.RawMessage
+	Details jsontext.Value
 }
 
 // ModelDiscovery describes the result of querying one configured backend.
@@ -97,7 +98,7 @@ func (p *Proxy) discoverBackendModels(ctx context.Context, backend *resolvedBack
 	}
 
 	var response struct {
-		Data []json.RawMessage `json:"data"`
+		Data []jsontext.Value `json:"data"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		result.Err = fmt.Errorf("parse models response: %w", err)
